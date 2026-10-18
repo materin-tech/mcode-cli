@@ -59,12 +59,13 @@ fn scan(dir: &Path, source: &'static str, out: &mut Vec<LoadedPlugin>) {
     for e in entries.flatten() {
         let manifest = e.path().join("plugin.json");
         if let Ok(bytes) = std::fs::read(&manifest)
-            && let Ok(m) = serde_json::from_slice::<PluginManifest>(&bytes) {
-                out.push(LoadedPlugin {
-                    manifest: m,
-                    source,
-                });
-            }
+            && let Ok(m) = serde_json::from_slice::<PluginManifest>(&bytes)
+        {
+            out.push(LoadedPlugin {
+                manifest: m,
+                source,
+            });
+        }
     }
 }
 

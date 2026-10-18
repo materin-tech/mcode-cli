@@ -29,7 +29,6 @@ pub struct Provider {
     pub multimodal_models: Vec<String>,
 }
 
-
 impl Provider {
     /// 解析 API key：优先环境变量，非合法变量名则按明文兜底（对齐 config.ts resolveApiKey）
     pub fn resolve_api_key(&self) -> Option<String> {
@@ -38,9 +37,10 @@ impl Provider {
             return None;
         }
         if let Ok(from_env) = std::env::var(v)
-            && !from_env.is_empty() {
-                return Some(from_env);
-            }
+            && !from_env.is_empty()
+        {
+            return Some(from_env);
+        }
         let is_env_name = {
             let mut cs = v.chars();
             match cs.next() {
@@ -78,7 +78,6 @@ pub enum Language {
     #[serde(rename = "ko_KR")]
     KoKr,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
@@ -156,9 +155,10 @@ impl Config {
     /// 当前激活模型名（对齐 resolveActiveModel：activeModel 优先，回落 provider 首个）
     pub fn active_model(&self) -> Option<String> {
         if let Some(m) = self.active_model.as_deref()
-            && !m.is_empty() {
-                return Some(m.to_string());
-            }
+            && !m.is_empty()
+        {
+            return Some(m.to_string());
+        }
         self.active_provider()
             .and_then(|p| p.models.first().cloned())
     }
@@ -250,7 +250,6 @@ pub struct DesktopConfig {
     #[serde(default)]
     pub recent_workspaces: Vec<String>,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -425,9 +424,11 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("mcode-cfg-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let p = dir.join("desktop.json");
-        let mut d = DesktopConfig::default();
-        d.thinking_effort = "high".into();
-        d.recent_workspaces = vec!["/tmp/x".into()];
+        let d = DesktopConfig {
+            thinking_effort: "high".into(),
+            recent_workspaces: vec!["/tmp/x".into()],
+            ..Default::default()
+        };
         std::fs::write(&p, serde_json::to_string_pretty(&d).unwrap()).unwrap();
         let loaded = DesktopConfig::load_from(&p);
         assert_eq!(loaded.thinking_effort, "high");

@@ -146,6 +146,7 @@ pub enum StreamEvent {
 
 /// 模型回调抽象：api 层实现它，loop 只做编排（可测试）
 #[async_trait::async_trait]
+#[allow(clippy::too_many_arguments)] // 签名锁定 CLI 对齐口径（system/history/input/attachments/effort…），不强行收拢成参数对象
 pub trait ModelBackend: Send + Sync {
     /// 单轮流式调用：产出文本/思考增量，返回完整回复与工具调用。
     /// 无请求级超时（对齐 CLI：只有用户打断能终止长生成）。

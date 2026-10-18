@@ -36,11 +36,12 @@ const STATUS_VERBS: [&str; 6] = [
     "Perfuming",
 ];
 
-/// 启动预置：恢复指定会话 / 直接打开会话选择器
+/// 启动预置：恢复指定会话 / 直接打开会话选择器；cwd 供全局 resume 覆盖工作目录
 #[derive(Default)]
 pub struct Preload {
     pub session_id: Option<String>,
     pub open_sessions: bool,
+    pub cwd: Option<std::path::PathBuf>,
 }
 
 pub fn run(cfg: Config, cwd: std::path::PathBuf, preload: Preload) -> Result<()> {
@@ -58,16 +59,29 @@ async fn async_run(cfg: Config, cwd: std::path::PathBuf, preload: Preload) -> Re
         );
     }
 
+    // 全局 resume：工作目录切到会话原属项目（对齐 TS listAllSessions/loadSessionGlobal 语义）
+    let cwd = preload.cwd.clone().unwrap_or(cwd);
+
+    // 内置资产物化（必须在 build_harness 之前——skills 加载读 ~/.mcode/assets）
+    let materialized = crate::assets::materialize_bundled_assets();
+
     let hist = Arc::new(Mutex::new(
         mcode_core::agent::history::HistoryStore::default(),
     ));
     let mut app = ChatApp::new(cfg.clone(), cwd.clone(), hist);
+    for tier in &materialized {
+        app.transcript.items.push(crate::chat::ChatItem::System {
+            text: format!("✓ 内置资产已物化 {tier} → ~/.mcode/assets"),
+            error: false,
+        });
+    }
     if let Some(id) = &preload.session_id
-        && let Err(e) = app.load_session(id) {
-            bail!("恢复会话 {id} 失败：{e:#}");
-        }
+        && let Err(e) = app.load_session(id)
+    {
+        bail!("恢复会话 {id} 失败：{e:#}");
+    }
 
-    // harness：provider 未就绪也允许进 TUI（banner 提示引导），但回合会被 pre-flight 拦下
+    // harness：provider 未就绪也允许进 TUI（引导接管），但回合会被 pre-flight 拦下
     let mut ui_rx = None;
     if cfg.provider_ready().is_ok() {
         match build_harness(&cfg, &cwd).await {
@@ -92,7 +106,9 @@ async fn async_run(cfg: Config, cwd: std::path::PathBuf, preload: Preload) -> Re
         }
     } else {
         app.transcript.items.push(crate::chat::ChatItem::System {
-            text: "未配置供应商：运行 `mcode add_provider` 或编辑 ~/.mcode/config.json".into(),
+            text: crate::locales::strings(cfg.language)
+                .no_provider_warning
+                .to_string(),
             error: true,
         });
     }
@@ -102,26 +118,35 @@ async fn async_run(cfg: Config, cwd: std::path::PathBuf, preload: Preload) -> Re
     // 按键线程：阻塞读 → mpsc
     let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
-        loop {
-            match crossterm::event::read() {
-                Ok(ev) => {
-                    if key_tx.send(ev).is_err() {
-                        break;
-                    }
-                }
-                Err(_) => break,
+        // read() 出错（终端关闭）或通道断开即退出线程
+        while let Ok(ev) = crossterm::event::read() {
+            if key_tx.send(ev).is_err() {
+                break;
             }
         }
     });
 
     let mut ui = UiState::new(app, ui_rx, preload.open_sessions);
+    // 首次启动（无 provider）→ 引导向导接管（对齐 TS providers.length === 0）
+    if cfg.providers.is_empty() {
+        ui.guide = Some(crate::guide::Guide::new(cfg.language));
+    }
     let mut tick = tokio::time::interval(Duration::from_millis(TICK_MS));
     let mut quit = false;
 
     while !quit {
-        // 会话选择器数据惰性加载
+        // 会话选择器数据惰性加载（本地为空 → 全局跨项目兜底，对齐 TS listAllSessions）
         if ui.sessions.is_none() && ui.want_sessions {
-            let list = SessionStore::list(&ui.app.cwd).unwrap_or_default();
+            let mut list = SessionStore::list(&ui.app.cwd).unwrap_or_default();
+            if list.is_empty() {
+                list = mcode_core::sessions::SessionStore::list_all();
+                if !list.is_empty() {
+                    ui.app.transcript.items.push(crate::chat::ChatItem::System {
+                        text: format!("本地无会话 — 显示全局 {} 条", list.len()),
+                        error: false,
+                    });
+                }
+            }
             ui.sessions = Some((list, 0));
             ui.want_sessions = false;
         }
@@ -179,6 +204,8 @@ struct UiState {
     sessions: Option<(Vec<mcode_core::sessions::SessionMeta>, usize)>,
     want_sessions: bool,
     files: Vec<String>,
+    /// 首次启动引导（providers 为空时接管界面）
+    guide: Option<crate::guide::Guide>,
 }
 
 impl UiState {
@@ -204,6 +231,7 @@ impl UiState {
             sessions: None,
             want_sessions: open_sessions,
             files,
+            guide: None,
         }
     }
 
@@ -256,14 +284,30 @@ impl UiState {
 fn candidates(ui: &UiState) -> Vec<mcode_core::agent::completion::Candidate> {
     use mcode_core::agent::completion::Candidate;
     match ui.completion.trigger {
-        Some(Trigger::Slash) => filter_commands(&ui.completion.query)
-            .into_iter()
-            .map(|c| Candidate {
-                name: c.name.trim_start_matches('/').to_string(),
-                desc: c.desc.to_string(),
-                is_dir: false,
-            })
-            .collect(),
+        Some(Trigger::Slash) => {
+            let mut out: Vec<Candidate> = filter_commands(&ui.completion.query)
+                .into_iter()
+                .map(|c| Candidate {
+                    name: c.name.trim_start_matches('/').to_string(),
+                    desc: c.desc.to_string(),
+                    is_dir: false,
+                })
+                .collect();
+            // 技能同名斜杠指令（对齐 TS createSkillCommands：/skill-name [args]）
+            if let Some(h) = &ui.app.harness {
+                let q = ui.completion.query.to_lowercase();
+                for s in &h.deps.skills {
+                    if s.entry.name.to_lowercase().starts_with(&q) {
+                        out.push(Candidate {
+                            name: s.entry.name.clone(),
+                            desc: format!("skill: {}", s.entry.description),
+                            is_dir: false,
+                        });
+                    }
+                }
+            }
+            out
+        }
         Some(Trigger::At) => {
             let q = ui.completion.query.to_lowercase();
             ui.files
@@ -347,6 +391,24 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
         code, modifiers, ..
     } = key;
 
+    // -- 首次启动引导（接管一切按键；对齐 TS providers 为空时渲染 GuidedSetup）--
+    if let Some(guide) = ui.guide.as_mut() {
+        // ctrl+c 始终可退出
+        if code == KeyCode::Char('c') && modifiers.contains(KeyModifiers::CONTROL) {
+            return true;
+        }
+        match guide.handle_key(key) {
+            crate::guide::GuideAction::None => {}
+            crate::guide::GuideAction::Completed(result) => {
+                ui.guide = None;
+                ui.app.complete_guide(result);
+                // provider 就绪 → 立即建 harness（等价 /model 的 RebuildHarness 路径）
+                return apply_effect(ui, Effect::RebuildHarness).await.unwrap_or(false);
+            }
+        }
+        return false;
+    }
+
     // -- 模型选择器 --
     if let Some((models, sel)) = ui.model_picker.as_mut() {
         match code {
@@ -357,15 +419,16 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
                 let model = models.get(*sel).cloned();
                 ui.model_picker = None;
                 if let Some(m) = model
-                    && ui.app.set_model(&m) {
-                        ui.app.transcript.items.push(crate::chat::ChatItem::System {
-                            text: format!("✓ 模型 → {m}（重建运行时生效）"),
-                            error: false,
-                        });
-                        return apply_effect(ui, Effect::RebuildHarness)
-                            .await
-                            .unwrap_or(false);
-                    }
+                    && ui.app.set_model(&m)
+                {
+                    ui.app.transcript.items.push(crate::chat::ChatItem::System {
+                        text: format!("✓ 模型 → {m}（重建运行时生效）"),
+                        error: false,
+                    });
+                    return apply_effect(ui, Effect::RebuildHarness)
+                        .await
+                        .unwrap_or(false);
+                }
             }
             _ => {}
         }
@@ -379,10 +442,26 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
             KeyCode::Down => *sel = (*sel + 1) % list.len().max(1),
             KeyCode::Esc => ui.sessions = None,
             KeyCode::Enter => {
-                let id = list.get(*sel).map(|s| s.id.clone());
+                let picked = list.get(*sel).cloned();
                 ui.sessions = None;
-                if let Some(id) = id {
-                    match ui.app.load_session(&id) {
+                if let Some(s) = picked {
+                    // 全局兜底列表里的会话可能属于其他项目 → 以 meta.cwd 读取并切换工作目录
+                    let same_project = s.cwd == ui.app.cwd.display().to_string();
+                    let mut new_cwd = None;
+                    let res = if same_project {
+                        ui.app.load_session(&s.id)
+                    } else {
+                        let target = std::path::PathBuf::from(&s.cwd);
+                        let r = ui.app.load_session_from(&target, &s.id);
+                        if r.is_ok() {
+                            new_cwd = Some(target);
+                        }
+                        r
+                    };
+                    if let Some(cwd) = new_cwd {
+                        ui.app.cwd = cwd;
+                    }
+                    match res {
                         Ok(_) => {}
                         Err(e) => ui.app.transcript.items.push(crate::chat::ChatItem::System {
                             text: format!("恢复会话失败：{e:#}"),
@@ -457,10 +536,11 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
         KeyCode::BackTab => {
             // shift+tab：循环权限模式（真值在 harness.deps.perms，锁被持有时跳过）
             if let Some(h) = &ui.app.harness
-                && let Ok(mut p) = h.deps.perms.try_lock() {
-                    p.cycle_mode();
-                    ui.app.mode = p.mode;
-                }
+                && let Ok(mut p) = h.deps.perms.try_lock()
+            {
+                p.cycle_mode();
+                ui.app.mode = p.mode;
+            }
         }
         KeyCode::Esc => {
             if ui.completion.is_open() {
@@ -654,8 +734,11 @@ fn draw(f: &mut ratatui::Frame, ui: &mut UiState) {
     if ui.model_picker.is_some() {
         draw_model_picker(f, area, ui);
     }
-    if let Some((list, _)) = &ui.sessions {
-        draw_sessions(f, area, list);
+    if let Some((list, sel)) = &ui.sessions {
+        draw_sessions(f, area, list, *sel);
+    }
+    if let Some(guide) = &ui.guide {
+        crate::guide::draw(f, area, guide);
     }
 }
 
@@ -790,10 +873,11 @@ fn draw_confirm(f: &mut ratatui::Frame, area: Rect, ui: &UiState) {
     let Some(req) = &ui.app.pending_confirm else {
         return;
     };
+    let t = crate::locales::strings(ui.app.cfg.language);
     let rect = centered_rect(60, 8, area);
     let text = vec![
         Line::from(Span::styled(
-            format!("⚠ permission: run tool `{}`?", req.tool),
+            format!("⚠ {} `{}`", t.permission_ask, req.tool),
             Style::default()
                 .fg(Color::Yellow)
                 .add_modifier(ratatui::style::Modifier::BOLD),
@@ -805,7 +889,10 @@ fn draw_confirm(f: &mut ratatui::Frame, area: Rect, ui: &UiState) {
         )),
         Line::from(""),
         Line::from(Span::styled(
-            "y = allow · a = allow always · n = deny (Esc)",
+            format!(
+                "y = {} · a = always · n = {} (Esc)",
+                t.permission_allow, t.permission_deny
+            ),
             Style::default().fg(Color::Yellow),
         )),
     ];
@@ -851,7 +938,12 @@ fn draw_model_picker(f: &mut ratatui::Frame, area: Rect, ui: &UiState) {
     );
 }
 
-fn draw_sessions(f: &mut ratatui::Frame, area: Rect, list: &[mcode_core::sessions::SessionMeta]) {
+fn draw_sessions(
+    f: &mut ratatui::Frame,
+    area: Rect,
+    list: &[mcode_core::sessions::SessionMeta],
+    sel: usize,
+) {
     if list.is_empty() {
         let rect = centered_rect(50, 5, area);
         let para = Paragraph::new("当前目录没有历史会话")
@@ -864,13 +956,13 @@ fn draw_sessions(f: &mut ratatui::Frame, area: Rect, list: &[mcode_core::session
     let items: Vec<ListItem> = list
         .iter()
         .map(|s| {
+            // 全局列表可能含其他项目的会话 → 显示 cwd 便于辨认
             ListItem::new(Line::from(Span::raw(format!(
-                "{} · {} · {} turns · {} tokens",
-                s.title, s.updated, s.turns, s.tokens_total
+                "{} · {} · {} turns · {} tokens · {}",
+                s.title, s.updated, s.turns, s.tokens_total, s.cwd
             ))))
         })
         .collect();
-    let sel = list.len().saturating_sub(1);
     let lw = List::new(items)
         .block(
             Block::default()
@@ -886,7 +978,7 @@ fn draw_sessions(f: &mut ratatui::Frame, area: Rect, list: &[mcode_core::session
     );
 }
 
-fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
+pub(crate) fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
     let w = r.width * percent_x / 100;
     let x = r.x + (r.width.saturating_sub(w)) / 2;
     let h = height.min(r.height.saturating_sub(2));

@@ -424,9 +424,10 @@ impl Tool for Grep {
                 Err(_) => continue,
             };
             if let Some(m) = &inc_matcher
-                && !m(&rel) {
-                    continue;
-                }
+                && !m(&rel)
+            {
+                continue;
+            }
             let Ok(bytes) = std::fs::read(entry.path()) else {
                 continue;
             };

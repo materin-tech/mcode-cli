@@ -150,11 +150,13 @@ impl Transcript {
                         detail: d,
                         ok,
                     } = it
-                        && n == name && d == "(running)" {
-                            *d = detail;
-                            *ok = *success;
-                            break;
-                        }
+                        && n == name
+                        && d == "(running)"
+                    {
+                        *d = detail;
+                        *ok = *success;
+                        break;
+                    }
                 }
             }
             AgentEvent::Done { reply } => {

@@ -10,7 +10,7 @@
 use crate::config::{DesktopConfig, HookEvent};
 use anyhow::Result;
 use serde_json::{Value, json};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::time::Duration;
 
 const HOOK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -43,7 +43,7 @@ impl HookEngine {
         Self { hooks }
     }
 
-    fn load_file(path: &PathBuf) -> Vec<crate::config::HookConfig> {
+    fn load_file(path: &Path) -> Vec<crate::config::HookConfig> {
         let cfg: DesktopConfig = DesktopConfig::load_from(path);
         cfg.hooks
     }
@@ -148,9 +148,10 @@ impl HookEngine {
                 "output": output_summary.chars().take(2000).collect::<String>(),
             });
             if let Ok(o) = self.run_command(&h.command, &payload).await
-                && !o.output.is_empty() {
-                    outputs.push(o.output);
-                }
+                && !o.output.is_empty()
+            {
+                outputs.push(o.output);
+            }
         }
         outputs.join("\n")
     }

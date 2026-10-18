@@ -690,9 +690,9 @@ mod tests {
         )
         .await;
         assert_eq!(reply, "done!"); // 拒绝后模型继续产出最终回复
+        responder.await.unwrap();
         let ev = events.lock().unwrap();
         assert!(ev.iter().any(|e| matches!(e, AgentEvent::ToolResult { success: false, output, .. } if output.contains("denied by user"))));
-        responder.await.unwrap();
     }
 
     #[tokio::test]

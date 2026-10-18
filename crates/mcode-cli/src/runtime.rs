@@ -12,7 +12,7 @@ use mcode_core::permission::PermissionManager;
 use mcode_core::tools::{EventSink, ToolRegistry};
 use mcode_core::util::TokenLedger;
 use mcode_core::{agent::AgentEvent, config::Config};
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 /// UI 统一事件流
@@ -45,14 +45,14 @@ impl Harness {
 
 /// 构建 harness：后端 + 工具注册表（内置/web/skill/task/MCP）+ 权限 + hooks + ledger。
 /// MCP 连接为真实进程握手（initialize → tools/list）。
-pub async fn build_harness(cfg: &Config, cwd: &PathBuf) -> Result<Harness> {
+pub async fn build_harness(cfg: &Config, cwd: &Path) -> Result<Harness> {
     build_harness_with_backend(cfg, cwd, None).await
 }
 
 /// 测试注入用：显式给后端（绕过 ResponsesBackend 的真实 HTTP 客户端），其余组装路径完全一致。
 pub async fn build_harness_with_backend(
     cfg: &Config,
-    cwd: &PathBuf,
+    cwd: &Path,
     backend_override: Option<Arc<dyn ModelBackend>>,
 ) -> Result<Harness> {
     cfg.provider_ready()?;
@@ -93,7 +93,7 @@ pub async fn build_harness_with_backend(
         hooks: Arc::new(HookEngine::load(cwd)),
         confirm: confirm_tx,
         cancel_tx,
-        cwd: cwd.clone(),
+        cwd: cwd.to_path_buf(),
         skills,
         agents: Arc::new(all_agents()),
         project_doc: load_project_doc(cwd),

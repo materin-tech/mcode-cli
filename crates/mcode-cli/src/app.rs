@@ -207,11 +207,12 @@ impl ChatApp {
                     return Effect::None;
                 }
                 if !reply.is_empty()
-                    && let Some(s) = self.session.as_mut() {
-                        let m = Message::text(Role::Assistant, reply.clone());
-                        let _ = s.append_message(&m);
-                        s.meta.turns += 1;
-                    }
+                    && let Some(s) = self.session.as_mut()
+                {
+                    let m = Message::text(Role::Assistant, reply.clone());
+                    let _ = s.append_message(&m);
+                    s.meta.turns += 1;
+                }
                 self.busy = false;
                 if self.goal.is_some() && !reply.is_empty() {
                     Effect::SpawnGoalCheck
@@ -288,10 +289,11 @@ impl ChatApp {
             return;
         }
         if self.busy
-            && let Some(h) = &self.harness {
-                let _ = h.deps.cancel_tx.send(true);
-                self.notice("⏹ 已请求打断…", false);
-            }
+            && let Some(h) = &self.harness
+        {
+            let _ = h.deps.cancel_tx.send(true);
+            self.notice("⏹ 已请求打断…", false);
+        }
     }
 
     // ---------- 斜杠指令（返回 true = 本地已解释） ----------
@@ -553,7 +555,26 @@ impl ChatApp {
             }
             "/exit" | "/quit" => return Effect::Quit,
             other => {
-                self.notice(format!("暂未支持：{other}（/help 查看指令列表）"), false);
+                // /<skill-name> [args] → 注入技能 body 作为回合 prompt（对齐 TS createSkillCommands）
+                if let Some(skill) = self
+                    .harness
+                    .as_ref()
+                    .and_then(|h| h.deps.skills.iter().find(|s| s.entry.name == other))
+                {
+                    let task = arg;
+                    let suffix = if task.is_empty() {
+                        "Follow the skill instructions.".to_string()
+                    } else {
+                        format!("Task: {task}")
+                    };
+                    let prompt = format!("[skill: {}]\n{}\n\n{suffix}", skill.entry.name, skill.body);
+                    return match self.prepare_turn(&prompt) {
+                        Some(t) => Effect::Turn(t),
+                        None => Effect::None,
+                    };
+                }
+                let not_found = crate::locales::strings(self.cfg.language).command_not_found;
+                self.notice(format!("{not_found}：{other}（/help 查看指令列表）"), false);
             }
         }
         Effect::None
@@ -562,7 +583,13 @@ impl ChatApp {
     /// 恢复历史会话：JSONL 富消息 → ChatItem 映射 + hist 重建（相邻 user/assistant 文本对）。
     /// （对齐 MCode_Desktop session_ops::resume_session）
     pub fn load_session(&mut self, id: &str) -> Result<()> {
-        let (store, msgs) = SessionStore::load(&self.cwd, id)?;
+        let cwd = self.cwd.clone();
+        self.load_session_from(&cwd, id)
+    }
+
+    /// 指定项目目录恢复（全局 resume 用：会话可能属于其他项目）
+    pub fn load_session_from(&mut self, project_cwd: &std::path::Path, id: &str) -> Result<()> {
+        let (store, msgs) = SessionStore::load(project_cwd, id)?;
         let mut hist = mcode_core::agent::history::HistoryStore::default();
         let mut items = vec![];
         let mut pending_user: Option<String> = None;
@@ -608,6 +635,20 @@ impl ChatApp {
         self.transcript.clear();
         self.transcript.items = items;
         Ok(())
+    }
+
+    /// 引导完成 → 应用配置并落盘（对齐 TS GuidedSetup onComplete；harness 由调用方重建）
+    pub fn complete_guide(&mut self, result: crate::guide::GuideResult) {
+        self.cfg.language = result.language;
+        self.cfg.providers = vec![result.provider.clone()];
+        self.cfg.active_provider = Some(result.provider.name.clone());
+        self.cfg.active_model = result.provider.models.first().cloned();
+        self.cfg.default_mode = result.default_mode;
+        if let Err(e) = self.cfg.save() {
+            self.notice(format!("✗ 配置保存失败：{e:#}"), true);
+        }
+        let done = crate::locales::strings(self.cfg.language).guide_done;
+        self.notice(done, false);
     }
 
     /// 切换 active_model（校验在当前供应商模型列表内）。调用方随后应重建 harness。

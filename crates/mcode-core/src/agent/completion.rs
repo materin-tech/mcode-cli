@@ -15,8 +15,7 @@ pub enum Trigger {
     At,
 }
 
-#[derive(Debug, Clone)]
-#[derive(Default)]
+#[derive(Debug, Clone, Default)]
 pub struct CompletionState {
     pub trigger: Option<Trigger>,
     pub query: String,
@@ -30,7 +29,6 @@ pub struct Candidate {
     pub desc: String,
     pub is_dir: bool,
 }
-
 
 impl CompletionState {
     /// 根据光标前最后一个 token 更新触发状态（对齐 prototype 的 updateTrigger 正则语义）

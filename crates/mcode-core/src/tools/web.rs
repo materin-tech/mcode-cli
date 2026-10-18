@@ -78,10 +78,11 @@ fn html_to_text(html: &str) -> String {
     // 去掉 script/style 块
     for tag in ["script", "style", "noscript"] {
         if let Some((start, _)) = find_tag(&s, tag)
-            && let Some(end_rel) = s[start..].find(&format!("</{tag}>")) {
-                let end = start + end_rel + tag.len() + 3;
-                s.replace_range(start..end.min(s.len()), " ");
-            }
+            && let Some(end_rel) = s[start..].find(&format!("</{tag}>"))
+        {
+            let end = start + end_rel + tag.len() + 3;
+            s.replace_range(start..end.min(s.len()), " ");
+        }
     }
     // 块级标签换行
     for t in [

@@ -80,12 +80,40 @@ impl SessionStore {
             let name = entry.file_name().to_string_lossy().into_owned();
             if name.ends_with(".meta.json")
                 && let Ok(bytes) = std::fs::read(entry.path())
-                    && let Ok(m) = serde_json::from_slice::<SessionMeta>(&bytes) {
-                        metas.push(m);
-                    }
+                && let Ok(m) = serde_json::from_slice::<SessionMeta>(&bytes)
+            {
+                metas.push(m);
+            }
         }
         metas.sort_by(|a, b| b.updated.cmp(&a.updated));
         Ok(metas)
+    }
+
+    /// 跨项目列出全部会话（TS listAllSessions 对齐：本目录无会话时 --resume/--continue 的全局兜底）。
+    /// meta 自带 cwd，恢复时以 meta.cwd 作为项目目录读取消息流。
+    pub fn list_all() -> Vec<SessionMeta> {
+        let projects = crate::util::mcode_dir().join("projects");
+        let mut metas = vec![];
+        let Ok(rd) = std::fs::read_dir(&projects) else {
+            return metas;
+        };
+        for proj in rd.flatten() {
+            let sessions = proj.path().join("sessions");
+            let Ok(entries) = std::fs::read_dir(&sessions) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                if name.ends_with(".meta.json")
+                    && let Ok(bytes) = std::fs::read(entry.path())
+                    && let Ok(m) = serde_json::from_slice::<SessionMeta>(&bytes)
+                {
+                    metas.push(m);
+                }
+            }
+        }
+        metas.sort_by(|a, b| b.updated.cmp(&a.updated));
+        metas
     }
 
     pub fn append_message(&mut self, m: &Message) -> Result<()> {

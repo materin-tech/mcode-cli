@@ -94,13 +94,15 @@ pub fn assets_source_dir() -> Option<PathBuf> {
             .parent()
             .and_then(|p| p.parent())
             .map(|p| p.join("Resources/assets"))
-            && res.is_dir() {
-                return Some(res);
-            }
+            && res.is_dir()
+        {
+            return Some(res);
+        }
         if let Some(adj) = exe.parent().map(|p| p.join("assets"))
-            && adj.is_dir() {
-                return Some(adj);
-            }
+            && adj.is_dir()
+        {
+            return Some(adj);
+        }
     }
     // cargo run / 开发态：仓库根 assets
     let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../assets");

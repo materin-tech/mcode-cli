@@ -51,16 +51,17 @@ fn load_dir(dir: &Path, source: &str, out: &mut Vec<Skill>) {
     for e in entries.flatten() {
         let p = e.path().join("SKILL.md");
         if let Ok(text) = std::fs::read_to_string(&p)
-            && let Some((name, description, body)) = parse_skill_md(&text) {
-                out.push(Skill {
-                    entry: SkillEntry {
-                        name,
-                        description,
-                        source: source.to_string(),
-                    },
-                    body,
-                });
-            }
+            && let Some((name, description, body)) = parse_skill_md(&text)
+        {
+            out.push(Skill {
+                entry: SkillEntry {
+                    name,
+                    description,
+                    source: source.to_string(),
+                },
+                body,
+            });
+        }
     }
 }
 

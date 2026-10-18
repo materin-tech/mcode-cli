@@ -11,8 +11,11 @@
 //!   mcode --version           版本
 
 mod app;
+mod assets;
 mod chat;
+mod guide;
 mod inputlog;
+mod locales;
 mod runtime;
 mod tui;
 mod view;
@@ -56,23 +59,47 @@ fn main() -> Result<()> {
     let cfg = load_config_for_tui()?;
     let cwd = std::env::current_dir()?;
 
+    // --continue / --resume <id>：本地无会话时全局跨项目兜底（对齐 TS listAllSessions）
+    let local = mcode_core::sessions::SessionStore::list(&cwd).unwrap_or_default();
+
     let preload = if continue_flag {
-        let list = mcode_core::sessions::SessionStore::list(&cwd)?;
-        let newest = list.first().map(|m| m.id.clone());
+        let target = local.first().cloned().or_else(|| {
+            mcode_core::sessions::SessionStore::list_all()
+                .first()
+                .cloned()
+                .inspect(|_| {
+                    println!("本地无会话 — 恢复全局最近会话");
+                })
+        });
         tui::Preload {
-            session_id: newest,
+            session_id: target.as_ref().map(|m| m.id.clone()),
+            cwd: target.map(|m| std::path::PathBuf::from(m.cwd)),
             open_sessions: false,
         }
     } else if resume_no_arg {
         tui::Preload {
             session_id: None,
+            cwd: None,
             open_sessions: true,
         }
-    } else {
+    } else if let Some(id) = resume_id {
+        // 本地找不到 → 全局找（meta.cwd 指向原项目目录）
+        let meta = local
+            .iter()
+            .find(|m| m.id == id)
+            .cloned()
+            .or_else(|| {
+                mcode_core::sessions::SessionStore::list_all()
+                    .into_iter()
+                    .find(|m| m.id == id)
+            });
         tui::Preload {
-            session_id: resume_id,
+            session_id: Some(id),
+            cwd: meta.map(|m| std::path::PathBuf::from(m.cwd)),
             open_sessions: false,
         }
+    } else {
+        tui::Preload::default()
     };
 
     tui::run(cfg, cwd, preload)

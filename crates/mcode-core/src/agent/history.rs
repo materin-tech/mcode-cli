@@ -13,7 +13,6 @@ pub struct HistoryStore {
     turns: Vec<(String, String)>,
 }
 
-
 impl HistoryStore {
     /// assistant 为空不落对（纯工具轮不重复记录，对齐 CLI pushTurn 语义）
     pub fn push_turn(&mut self, user: impl Into<String>, assistant: impl Into<String>) {

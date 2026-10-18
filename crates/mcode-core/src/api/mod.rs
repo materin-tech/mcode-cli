@@ -134,17 +134,19 @@ impl ModelBackend for ResponsesBackend {
                 match v["type"].as_str() {
                     Some("response.output_text.delta") => {
                         if let Some(d) = v["delta"].as_str()
-                            && !d.is_empty() {
-                                turn.reply.push_str(d);
-                                on_event(StreamEvent::TextDelta(d.to_string()));
-                            }
+                            && !d.is_empty()
+                        {
+                            turn.reply.push_str(d);
+                            on_event(StreamEvent::TextDelta(d.to_string()));
+                        }
                     }
                     Some("response.reasoning_summary_text.delta")
                     | Some("response.reasoning_text.delta") => {
                         if let Some(d) = v["delta"].as_str()
-                            && !d.is_empty() {
-                                on_event(StreamEvent::Reasoning(d.to_string()));
-                            }
+                            && !d.is_empty()
+                        {
+                            on_event(StreamEvent::Reasoning(d.to_string()));
+                        }
                     }
                     Some("response.output_item.done") => {
                         let item = &v["item"];
