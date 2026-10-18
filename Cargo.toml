@@ -21,7 +21,11 @@ similar = "2"          # diff 算法（edit_file 卡片渲染源）
 globset = "0.4"        # glob 匹配（glob/grep include 工具）
 futures = "0.3"
 async-trait = "0.1"
-reqwest = { version = "0.12", features = ["json", "stream"] }
+reqwest = { version = "0.12", default-features = false, features = [
+    "json",
+    "stream",
+    "rustls-tls",
+] }  # rustls：musl 目标无 OpenSSL 依赖（openssl-sys 在 x86_64-unknown-linux-musl 编不过）
 walkdir = "2"
 
 # CLI 依赖
