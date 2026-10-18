@@ -160,8 +160,14 @@ mod tests {
             assert!(!s.command_not_found.is_empty());
         }
         // zh_TW 继承 zh_CN 的未覆盖键（对齐 TS spread 语义）
-        assert_eq!(strings(Language::ZhTw).thinking, strings(Language::ZhCn).thinking);
+        assert_eq!(
+            strings(Language::ZhTw).thinking,
+            strings(Language::ZhCn).thinking
+        );
         // ja/ko 继承 en_US
-        assert_eq!(strings(Language::JaJp).mode_plan, strings(Language::EnUs).mode_plan);
+        assert_eq!(
+            strings(Language::JaJp).mode_plan,
+            strings(Language::EnUs).mode_plan
+        );
     }
 }

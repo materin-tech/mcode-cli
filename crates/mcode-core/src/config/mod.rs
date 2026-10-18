@@ -455,3 +455,65 @@ mod tests {
         assert!(!c.needs_onboarding());
     }
 }
+
+#[cfg(test)]
+mod provider_ready_tests {
+    use super::*;
+
+    /// 回归：Config 是 rename_all = "camelCase" —— snake_case 键（active_provider）
+    /// 会被静默忽略并落到 default None，provider 看似配置实则从未生效。
+    /// 用 camelCase 键写盘 → 解析 → provider_ready 必须通过。
+    #[test]
+    fn camel_case_config_keys_are_required() {
+        let dir = std::env::temp_dir().join(format!("mcode_cfg_cam_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(
+            &path,
+            r#"{
+  "puaAlwaysOn": false,
+  "language": "zh_CN",
+  "activeProvider": "mock",
+  "activeModel": "mock-1",
+  "providers": [
+    {
+      "name": "mock",
+      "baseURL": "http://127.0.0.1:9/v1",
+      "apiKeyEnv": "MCODE_TEST_CFG_KEY",
+      "models": ["mock-1"],
+      "multimodalModels": []
+    }
+  ],
+  "defaultMode": "passon"
+}"#,
+        )
+        .unwrap();
+        let cfg = Config::try_load_from(&path).expect("camelCase config 应解析成功");
+        assert_eq!(cfg.active_provider.as_deref(), Some("mock"));
+        // SAFETY: 单线程测试设置一次性 env
+        unsafe { std::env::set_var("MCODE_TEST_CFG_KEY", "k") };
+        match cfg.provider_ready() {
+            Ok(()) => {}
+            Err(e) => panic!("provider_ready 应通过，实际：{e:#}"),
+        }
+
+        // 反例：同样的内容用 snake_case 键 → active_provider 被吞成 None
+        let bad = dir.join("config_snake.json");
+        std::fs::write(
+            &bad,
+            r#"{"pua_always_on": false, "language": "zh_CN", "active_provider": "mock",
+  "active_model": "mock-1",
+  "providers": [{"name": "mock", "baseURL": "http://127.0.0.1:9/v1",
+    "api_key_env": "MCODE_TEST_CFG_KEY", "models": ["mock-1"], "multimodal_models": []}],
+  "default_mode": "passon"}"#,
+        )
+        .unwrap();
+        let snake = Config::try_load_from(&bad).unwrap();
+        assert!(
+            snake.active_provider.is_none(),
+            "snake_case 键应被静默忽略（这正是要防的坑）"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}

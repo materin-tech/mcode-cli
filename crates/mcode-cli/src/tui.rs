@@ -227,7 +227,7 @@ impl UiState {
         open_sessions: bool,
     ) -> Self {
         let mut input_history = InputHistory::default();
-        input_history.extend(inputlog::load());
+        input_history.extend(inputlog::load(&app.cwd));
         let files = list_workspace_files(&app.cwd);
         Self {
             app,
@@ -305,10 +305,11 @@ fn candidates(ui: &UiState) -> Vec<mcode_core::agent::completion::Candidate> {
                     is_dir: false,
                 })
                 .collect();
-            // 技能同名斜杠指令（对齐 TS createSkillCommands：/skill-name [args]）
-            if let Some(h) = &ui.app.harness {
+            // 技能同名斜杠指令（对齐 TS createSkillCommands：/skill-name [args]；
+            // 查 app.skills 无 harness 门槛 —— 无 provider 时补全也要可见）
+            {
                 let q = ui.completion.query.to_lowercase();
-                for s in &h.deps.skills {
+                for s in &ui.app.skills {
                     if s.entry.name.to_lowercase().starts_with(&q) {
                         out.push(Candidate {
                             name: s.entry.name.clone(),
@@ -415,7 +416,9 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
                 ui.guide = None;
                 ui.app.complete_guide(result);
                 // provider 就绪 → 立即建 harness（等价 /model 的 RebuildHarness 路径）
-                return apply_effect(ui, Effect::RebuildHarness).await.unwrap_or(false);
+                return apply_effect(ui, Effect::RebuildHarness)
+                    .await
+                    .unwrap_or(false);
             }
         }
         return false;

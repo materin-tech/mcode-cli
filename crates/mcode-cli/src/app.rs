@@ -18,6 +18,49 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 
+/// 本 CLI 已实现的指令（/help 列出；与 handle_command 的 match 分支保持一致，测试兜底对账）
+const IMPLEMENTED: &[&str] = &[
+    "/help",
+    "/clear",
+    "/compact",
+    "/model",
+    "/token",
+    "/language",
+    "/status",
+    "/doctor",
+    "/save",
+    "/resume",
+    "/init",
+    "/memory",
+    "/goal",
+    "/agents",
+    "/skills",
+    "/mcp",
+    "/permissions",
+    "/effort",
+    "/history",
+    "/exit",
+];
+
+/// TS builtin.ts 的 stub 指令（本构建输出说明不执行；/mcp /permissions 已真实现故不在列）
+const STUBS: &[&str] = &[
+    "/context",
+    "/export",
+    "/rewind",
+    "/todos",
+    "/copy",
+    "/config",
+    "/add-dir",
+    "/vim",
+    "/terminal-setup",
+    "/statusline",
+    "/output-style",
+    "/login",
+    "/logout",
+    "/bug",
+    "/release-notes",
+];
+
 /// 一次待启动的回合（tui.rs 拿去 spawn）
 pub struct Turn {
     pub input: String,
@@ -56,6 +99,10 @@ pub struct ChatApp {
     /// 权限模式本地缓存（真值在 harness.deps.perms）
     pub mode: Mode,
     pub version: &'static str,
+    /// 已加载技能（构造时无条件加载，与后端无关 — 对齐 TS createSkillCommands 进 ALL_COMMANDS）
+    pub skills: Vec<mcode_core::skills::Skill>,
+    /// 已加载 subagent 定义（同上，/agents 与补全在无 provider 时也要可用）
+    pub agents: Vec<mcode_core::agent::subagent::AgentDefinition>,
 }
 
 impl ChatApp {
@@ -65,6 +112,9 @@ impl ChatApp {
         hist: Arc<Mutex<mcode_core::agent::history::HistoryStore>>,
     ) -> Self {
         let mode = cfg.default_mode;
+        // 技能/agent 与后端无关，构造期即加载（assets 物化发生在 ChatApp::new 之前）
+        let skills = mcode_core::skills::load_all(&cwd);
+        let agents = mcode_core::agent::subagent::all_agents();
         Self {
             cfg,
             cwd,
@@ -80,6 +130,8 @@ impl ChatApp {
             tokens_total: 0,
             mode,
             version: env!("CARGO_PKG_VERSION"),
+            skills,
+            agents,
         }
     }
 
@@ -306,20 +358,42 @@ impl ChatApp {
 
     // ---------- 斜杠指令（返回 true = 本地已解释） ----------
 
+    /// 技能 prompt 拼装（对齐 TS createSkillCommands handler：带参 Task: {args}，无参固定句）
+    fn build_skill_prompt(name: &str, body: &str, task: &str) -> String {
+        let suffix = if task.is_empty() {
+            "Follow the skill instructions.".to_string()
+        } else {
+            format!("Task: {task}")
+        };
+        format!("[skill: {name}]\n{body}\n\n{suffix}")
+    }
+
     fn handle_command(&mut self, text: &str) -> Effect {
         let (cmd, arg) = text.split_once(' ').unwrap_or((text, ""));
         let cmd = cmd.trim().to_lowercase();
         let arg = arg.trim();
         match cmd.as_str() {
             "/help" => {
-                let names: Vec<String> = mcode_core::commands::COMMANDS
+                // 对齐 TS /help：名字 + 描述对齐表，stub 指令带 (stub) 标记
+                let width = mcode_core::commands::COMMANDS
                     .iter()
-                    .map(|c| c.name.to_string())
-                    .collect();
-                self.notice(
-                    format!("可用指令（{}）：\n{}", names.len(), names.join("  ")),
-                    false,
-                );
+                    .map(|c| c.name.len())
+                    .max()
+                    .unwrap_or(0);
+                let mut lines = vec![format!("Commands ({}):", IMPLEMENTED.len() + STUBS.len())];
+                for c in mcode_core::commands::COMMANDS.iter() {
+                    if IMPLEMENTED.contains(&c.name) {
+                        lines.push(format!("  {:<width$}  {}", c.name, c.desc, width = width));
+                    } else if STUBS.contains(&c.name) {
+                        lines.push(format!(
+                            "  {:<width$}  {} (stub)",
+                            c.name,
+                            c.desc,
+                            width = width
+                        ));
+                    }
+                }
+                self.notice(lines.join("\n"), false);
             }
             "/status" => {
                 self.notice(
@@ -457,24 +531,44 @@ impl ChatApp {
                 }
             }
             "/agents" => {
-                if let Some(h) = &self.harness {
-                    let names: Vec<String> = h.deps.agents.iter().map(|a| a.name.clone()).collect();
-                    self.notice(format!("可用 subagent：\n{}", names.join("\n")), false);
-                }
+                let names: Vec<String> = self.agents.iter().map(|a| a.name.clone()).collect();
+                self.notice(
+                    format!(
+                        "可用 subagent（{}）— 经 task 工具或自动拆解调度：\n{}",
+                        names.len(),
+                        names.join("\n")
+                    ),
+                    false,
+                );
             }
             "/skills" => {
-                if let Some(h) = &self.harness {
-                    let list: Vec<String> = h
-                        .deps
-                        .skills
-                        .iter()
-                        .map(|s| format!("{} — {}", s.entry.name, s.entry.description))
-                        .collect();
-                    self.notice(
-                        format!("已加载技能（{}）：\n{}", list.len(), list.join("\n")),
-                        false,
-                    );
+                // 对齐 TS /skills：按来源汇总计数 + 前 40 条
+                let list: Vec<String> = self
+                    .skills
+                    .iter()
+                    .map(|s| format!("  • {} [{}]", s.entry.name, s.entry.source))
+                    .collect();
+                let mut by_source: Vec<(String, usize)> = vec![];
+                for s in &self.skills {
+                    match by_source.iter_mut().find(|(k, _)| *k == s.entry.source) {
+                        Some((_, n)) => *n += 1,
+                        None => by_source.push((s.entry.source.clone(), 1)),
+                    }
                 }
+                let summary = by_source
+                    .iter()
+                    .map(|(k, n)| format!("{k}: {n}"))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                let mut lines = vec![format!(
+                    "已加载技能（{}）[{summary}] — /<skill-name> 运行，或由模型经 skill 工具拉取：",
+                    self.skills.len()
+                )];
+                lines.extend(list.iter().take(40).cloned());
+                if list.len() > 40 {
+                    lines.push(format!("  … 还有 {} 条（见 / 补全面板）", list.len() - 40));
+                }
+                self.notice(lines.join("\n"), false);
             }
             "/mcp" => {
                 if let Some(h) = &self.harness {
@@ -498,25 +592,45 @@ impl ChatApp {
                 }
             }
             "/memory" => {
+                // 对齐 TS /memory：只列存在的文档，📁 project / 🌐 global + 字符数
                 let paths = mcode_md_paths(&self.cwd);
-                let list = paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                self.notice(format!("记忆文件（nearest-first）：\n{list}"), false);
+                let mut lines = vec![];
+                let last = paths.len().saturating_sub(1);
+                for (i, p) in paths.iter().enumerate() {
+                    if !p.exists() {
+                        continue;
+                    }
+                    let chars = std::fs::read_to_string(p)
+                        .map(|c| c.chars().count())
+                        .unwrap_or(0);
+                    let scope = if i == last { "🌐" } else { "📁" };
+                    lines.push(format!("{scope} {} ({chars} chars)", p.display()));
+                }
+                if lines.is_empty() {
+                    self.notice("无 MCODE.md —— /init 生成一份", false);
+                } else {
+                    self.notice(format!("MCODE.md docs:\n{}", lines.join("\n")), false);
+                }
             }
             "/init" => {
-                let target = self.cwd.join("MCODE.md");
-                if target.exists() {
-                    self.notice("MCODE.md 已存在，跳过生成", false);
-                } else {
-                    let tpl = "# MCODE\n\n## 项目说明\n- 在此描述项目结构与约定（模型每回合都会读取）\n\n## 常用命令\n- build: \n- test: \n";
-                    match std::fs::write(&target, tpl) {
-                        Ok(_) => self.notice(format!("✓ 已生成 {}", target.display()), false),
-                        Err(e) => self.notice(format!("✗ 生成失败：{e}"), true),
-                    }
-                }
+                match mcode_core::util::init_mcode_doc(&self.cwd) {
+                    Ok((p, true)) => self.notice(format!("✓ 已生成 {}", p.display()), false),
+                    Ok((p, false)) => self.notice(format!("ℹ 已存在：{}", p.display()), false),
+                    Err(e) => self.notice(format!("✗ 生成失败：{e}"), true),
+                };
+            }
+            "/history" => {
+                // 对齐 TS /history 诊断口径
+                let s = crate::inputlog::stats(&self.cwd);
+                self.notice(
+                    format!(
+                        "history 文件：{}\n本 cwd 条目：{}（↑ 召回，cwd 优先）\n全局条目：{}\n若此处有计数但 ↑ 无反应，是按键事件未到达应用（终端/复用器问题）",
+                        s.file.display(),
+                        s.cwd_entries,
+                        s.global_entries
+                    ),
+                    false,
+                );
             }
             "/save" => {
                 match self.save_snapshot() {
@@ -563,26 +677,39 @@ impl ChatApp {
             }
             "/exit" | "/quit" => return Effect::Quit,
             other => {
-                // /<skill-name> [args] → 注入技能 body 作为回合 prompt（对齐 TS createSkillCommands）
+                // TS stub 指令：输出说明不执行（对齐 builtin.ts stubHandler）
+                if STUBS.contains(&other) {
+                    let desc = mcode_core::commands::COMMANDS
+                        .iter()
+                        .find(|c| c.name == other)
+                        .map(|c| c.desc)
+                        .unwrap_or("");
+                    self.notice(
+                        format!("ℹ {desc} — stub：本构建未支持（桌面版可用）"),
+                        false,
+                    );
+                    return Effect::None;
+                }
+                // /<skill-name> [args] → 注入技能 body 作为回合 prompt（对齐 TS createSkillCommands；
+                // 查 self.skills 而非 harness —— 无 provider 时技能也要可发现，回合启动才校验 key。
+                // cmd 保留前导斜杠而技能名不带；输入已 to_lowercase，按忽略大小写匹配）
+                let bare = other.trim_start_matches('/');
                 if let Some(skill) = self
-                    .harness
-                    .as_ref()
-                    .and_then(|h| h.deps.skills.iter().find(|s| s.entry.name == other))
+                    .skills
+                    .iter()
+                    .find(|s| s.entry.name.eq_ignore_ascii_case(bare))
                 {
-                    let task = arg;
-                    let suffix = if task.is_empty() {
-                        "Follow the skill instructions.".to_string()
-                    } else {
-                        format!("Task: {task}")
-                    };
-                    let prompt = format!("[skill: {}]\n{}\n\n{suffix}", skill.entry.name, skill.body);
+                    let prompt = Self::build_skill_prompt(&skill.entry.name, &skill.body, arg);
                     return match self.prepare_turn(&prompt) {
                         Some(t) => Effect::Turn(t),
                         None => Effect::None,
                     };
                 }
                 let not_found = crate::locales::strings(self.cfg.language).command_not_found;
-                self.notice(format!("{not_found}：{other}（/help 查看指令列表）"), false);
+                self.notice(
+                    format!("{not_found}：{other}（/help 输出完整指令表）"),
+                    false,
+                );
             }
         }
         Effect::None
@@ -763,6 +890,101 @@ mod tests {
         assert!(a.transcript.items.iter().any(
             |i| matches!(i, crate::chat::ChatItem::System { text, .. } if text.contains(not_found))
         ));
+    }
+
+    #[test]
+    fn skill_slash_dispatches_without_provider() {
+        // 对齐 TS createSkillCommands：技能指令与后端无关，无 provider 也必须可分派
+        // （回合启动时 prepare_turn 才校验 key）。回归：分派曾拿带斜杠的 "/p10"
+        // 去比技能名 "p10"，永远失配落到未知指令。
+        let mut a = app();
+        a.skills.push(mcode_core::skills::Skill {
+            entry: mcode_core::skills::SkillEntry {
+                name: "p10".into(),
+                description: "P10 CTO mode".into(),
+                source: "pua-core".into(),
+            },
+            body: "P10 BODY".into(),
+        });
+        // Config::default() 无 provider → prepare_turn 拦下（Effect::None + 警示），
+        // 但绝不能落到未知指令兜底
+        assert!(matches!(a.submit("/p10"), Effect::None));
+        let not_found = crate::locales::strings(a.cfg.language).command_not_found;
+        assert!(
+            !a.transcript.items.iter().any(
+                |i| matches!(i, crate::chat::ChatItem::System { text, .. } if text.contains(not_found))
+            ),
+            "/技能名 不应报未知指令"
+        );
+        // 大小写不敏感 + 无参数（空 task 走 "Follow the skill instructions."）
+        let mut b = app();
+        b.skills.push(mcode_core::skills::Skill {
+            entry: mcode_core::skills::SkillEntry {
+                name: "Pro".into(),
+                description: "pro".into(),
+                source: "pua-core".into(),
+            },
+            body: "B".into(),
+        });
+        assert!(matches!(b.submit("/pro"), Effect::None));
+    }
+
+    #[test]
+    fn command_tables_align_with_core() {
+        // /help 与 stub 分支按名字查 core COMMANDS 的 desc；两表失同步会漏行/空描述
+        for name in IMPLEMENTED.iter().chain(STUBS.iter()) {
+            assert!(
+                mcode_core::commands::COMMANDS
+                    .iter()
+                    .any(|c| c.name == *name),
+                "{name} 不在 core COMMANDS 里"
+            );
+        }
+    }
+
+    #[test]
+    fn skill_prompt_matches_ts_shape() {
+        assert_eq!(
+            ChatApp::build_skill_prompt("pua", "BODY", "do X"),
+            "[skill: pua]\nBODY\n\nTask: do X"
+        );
+        assert_eq!(
+            ChatApp::build_skill_prompt("pua", "BODY", ""),
+            "[skill: pua]\nBODY\n\nFollow the skill instructions."
+        );
+    }
+
+    #[test]
+    fn stub_command_reports_not_supported() {
+        let mut a = app();
+        assert!(matches!(a.submit("/copy"), Effect::None));
+        assert!(a.transcript.items.iter().any(
+            |i| matches!(i, crate::chat::ChatItem::System { text, .. } if text.contains("stub"))
+        ));
+    }
+
+    #[test]
+    fn init_creates_mcode_md_then_reports_existing() {
+        let dir = std::env::temp_dir().join(format!("mcode_app_init_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut a = ChatApp::new(
+            Config::default(),
+            dir.clone(),
+            Arc::new(Mutex::new(
+                mcode_core::agent::history::HistoryStore::default(),
+            )),
+        );
+        assert!(matches!(a.submit("/init"), Effect::None));
+        assert!(dir.join("MCODE.md").exists());
+        // 二次调用不覆盖用户内容（对齐 TS initMcodeDoc）
+        std::fs::write(dir.join("MCODE.md"), "keep").unwrap();
+        assert!(matches!(a.submit("/init"), Effect::None));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("MCODE.md")).unwrap(),
+            "keep"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

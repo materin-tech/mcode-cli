@@ -8,7 +8,7 @@ use include_dir::{Dir, include_dir};
 use mcode_core::util::mcode_dir;
 use std::path::Path;
 
-/// 仓库根 assets/（ecc-core: 115 agents + 311 skills；pua-core: 12 技能）
+/// 仓库根 assets/（ecc-core: 71 agents + 311 skills；pua-core: 12 技能）
 static BUNDLED: Dir = include_dir!("$CARGO_MANIFEST_DIR/../../assets");
 
 /// 物化内置资产组到 `~/.mcode/assets/<tier>`，返回本次新落地的组名（已存在 → 空表）。
@@ -30,22 +30,21 @@ pub fn materialize_bundled_assets() -> Vec<&'static str> {
     done
 }
 
-/// 递归写出嵌入目录组。include_dir 的路径保留嵌入根名（entries 形如
-/// `assets/ecc-core/...`），故以组自身路径为基准取相对路径，落到 `dst_root/<组名>/…`，
-/// 与 `dst_root.join(name).is_dir()` 的整组跳过检查对齐。
+/// 深度递归写出嵌入目录组。include_dir 0.7 的 `files()` 只遍历本层（非递归），
+/// 必须沿 `entries()` 下钻；嵌入根 Dir 的 path 为空，子项路径形如 `ecc-core/...`，
+/// 直接拼到 dst_root 下即与 `dst_root.join(name).is_dir()` 的整组跳过检查对齐。
 fn write_dir(dir: &Dir, dst_root: &Path) -> std::io::Result<()> {
-    let Some(name) = dir.path().file_name() else {
-        return Ok(());
-    };
-    let tier_root = dst_root.join(name);
-    std::fs::create_dir_all(&tier_root)?;
-    for f in dir.files() {
-        let rel = f.path().strip_prefix(dir.path()).unwrap_or(f.path());
-        let target = tier_root.join(rel);
-        if let Some(parent) = target.parent() {
-            std::fs::create_dir_all(parent)?;
+    for e in dir.entries() {
+        match e {
+            include_dir::DirEntry::Dir(d) => write_dir(d, dst_root)?,
+            include_dir::DirEntry::File(f) => {
+                let target = dst_root.join(f.path());
+                if let Some(parent) = target.parent() {
+                    std::fs::create_dir_all(parent)?;
+                }
+                std::fs::write(&target, f.contents())?;
+            }
         }
-        std::fs::write(&target, f.contents())?;
     }
     Ok(())
 }
@@ -54,48 +53,47 @@ fn write_dir(dir: &Dir, dst_root: &Path) -> std::io::Result<()> {
 mod tests {
     use super::*;
 
+    /// include_dir 的 files() 非递归 —— 测试口径按 entries() 深度计数
+    fn count_files(dir: &Dir, pred: &impl Fn(&Path) -> bool) -> usize {
+        dir.entries()
+            .iter()
+            .map(|e| match e {
+                include_dir::DirEntry::Dir(d) => count_files(d, pred),
+                include_dir::DirEntry::File(f) => usize::from(pred(f.path())),
+            })
+            .sum()
+    }
+
     #[test]
     fn bundled_assets_are_embedded() {
         use std::path::Component;
-        // include_dir 路径带嵌入根名前缀（如 assets/ecc-core/...），按路径段匹配而非精确前缀
-        let in_dir = |dir: &str, p: &std::path::Path| {
+        // 按路径段匹配目录归属，不依赖 include_dir 的前缀表示
+        let in_dir = |dir: &str, p: &Path| {
             p.components()
                 .any(|c| c == Component::Normal(std::ffi::OsStr::new(dir)))
         };
         // ecc-core 与 pua-core 两组都在
-        let names: Vec<_> = BUNDLED.dirs().filter_map(|d| d.path().file_name()).collect();
+        let names: Vec<_> = BUNDLED
+            .dirs()
+            .filter_map(|d| d.path().file_name())
+            .collect();
         assert!(names.contains(&std::ffi::OsStr::new("ecc-core")));
         assert!(names.contains(&std::ffi::OsStr::new("pua-core")));
         // ecc-core/skills 有相当数量 SKILL.md（311 个技能目录）
-        let skill_count = BUNDLED
-            .files()
-            .filter(|f| f.path().ends_with("SKILL.md") && in_dir("ecc-core", f.path()))
-            .count();
-        assert!(skill_count > 300, "ecc-core skills 应嵌入 300+，实际 {skill_count}");
-        // agents 同理（115 个）
-        let agent_count = BUNDLED
-            .files()
-            .filter(|f| f.path().extension() == Some("md".as_ref()) && in_dir("agents", f.path()))
-            .count();
-        assert!(agent_count > 100, "ecc-core agents 应嵌入 100+，实际 {agent_count}");
-    }
-}
-
-#[cfg(test)]
-mod probe {
-    #[test]
-    fn dump_embedded_tree() {
-        let mut n = 0;
-        for f in super::BUNDLED.files() {
-            if n < 5 {
-                println!("FILE: {}", f.path().display());
-            }
-            n += 1;
-        }
-        println!("total files: {n}");
-        println!("root path: {}", super::BUNDLED.path().display());
-        for d in super::BUNDLED.dirs() {
-            println!("dir: {}", d.path().display());
-        }
+        let skill_count = count_files(&BUNDLED, &|p| {
+            p.ends_with("SKILL.md") && in_dir("ecc-core", p)
+        });
+        assert!(
+            skill_count > 300,
+            "ecc-core skills 应嵌入 300+，实际 {skill_count}"
+        );
+        // agents 同理（磁盘实测 71 个，与嵌入数一致）
+        let agent_count = count_files(&BUNDLED, &|p| {
+            p.extension() == Some("md".as_ref()) && in_dir("agents", p)
+        });
+        assert!(
+            agent_count > 50,
+            "ecc-core agents 应嵌入 50+，实际 {agent_count}"
+        );
     }
 }

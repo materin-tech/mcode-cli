@@ -84,15 +84,11 @@ fn main() -> Result<()> {
         }
     } else if let Some(id) = resume_id {
         // 本地找不到 → 全局找（meta.cwd 指向原项目目录）
-        let meta = local
-            .iter()
-            .find(|m| m.id == id)
-            .cloned()
-            .or_else(|| {
-                mcode_core::sessions::SessionStore::list_all()
-                    .into_iter()
-                    .find(|m| m.id == id)
-            });
+        let meta = local.iter().find(|m| m.id == id).cloned().or_else(|| {
+            mcode_core::sessions::SessionStore::list_all()
+                .into_iter()
+                .find(|m| m.id == id)
+        });
         tui::Preload {
             session_id: Some(id),
             cwd: meta.map(|m| std::path::PathBuf::from(m.cwd)),

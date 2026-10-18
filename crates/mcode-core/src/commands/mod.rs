@@ -167,6 +167,12 @@ pub const COMMANDS: &[CommandDef] = &[
         mcode_only: false,
     },
     CommandDef {
+        name: "/goal",
+        group: "会话与上下文",
+        desc: "设置目标并持续工作直到达成",
+        mcode_only: true,
+    },
+    CommandDef {
         name: "/hooks",
         group: "扩展生态",
         desc: "hook 管理与查看",
@@ -201,6 +207,24 @@ pub const COMMANDS: &[CommandDef] = &[
         group: "扩展生态",
         desc: "PUA 效率教练模式开关",
         mcode_only: true,
+    },
+    CommandDef {
+        name: "/skills",
+        group: "扩展生态",
+        desc: "列出已加载技能",
+        mcode_only: true,
+    },
+    CommandDef {
+        name: "/history",
+        group: "账号与帮助",
+        desc: "诊断输入历史召回",
+        mcode_only: true,
+    },
+    CommandDef {
+        name: "/exit",
+        group: "账号与帮助",
+        desc: "退出 mcode",
+        mcode_only: false,
     },
     CommandDef {
         name: "/help",

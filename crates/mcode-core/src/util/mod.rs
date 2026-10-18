@@ -35,6 +35,34 @@ pub fn mcode_md_paths(cwd: &std::path::Path) -> Vec<PathBuf> {
     out
 }
 
+/// /init 模板（逐字对齐 TS memory/mdoc.ts 的 TEMPLATE）
+pub const MCODE_MD_TEMPLATE: &str = "# MCODE.md
+
+Project-level instructions for MCode. Loaded into the system prompt on every session.
+
+## Build & test
+
+<!-- e.g. npm run build / npm test -->
+
+## Conventions
+
+<!-- code style, naming, directory layout -->
+
+## Notes
+
+<!-- anything the agent should always know -->
+";
+
+/// 生成 MCODE.md（对齐 TS initMcodeDoc：已存在则不覆盖，返回 (路径, 是否新建)）
+pub fn init_mcode_doc(cwd: &std::path::Path) -> std::io::Result<(PathBuf, bool)> {
+    let path = cwd.join("MCODE.md");
+    if path.exists() {
+        return Ok((path, false));
+    }
+    std::fs::write(&path, MCODE_MD_TEMPLATE)?;
+    Ok((path, true))
+}
+
 pub fn sessions_dir(cwd: &std::path::Path) -> PathBuf {
     let hash = format!("{:x}", md5_of(cwd.to_string_lossy().as_bytes()));
     mcode_dir().join("projects").join(hash).join("sessions")
@@ -179,5 +207,23 @@ mod tests {
         );
         assert_eq!(l.by_model["glm-4.7"].input, 150);
         assert_eq!(l.total().output, 15);
+    }
+
+    #[test]
+    fn init_mcode_doc_creates_then_skips() {
+        let dir = std::env::temp_dir().join(format!("mcode_init_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (p1, created1) = init_mcode_doc(&dir).unwrap();
+        assert!(created1);
+        assert!(p1.ends_with("MCODE.md"));
+        let content1 = std::fs::read_to_string(&p1).unwrap();
+        assert!(content1.starts_with("# MCODE.md\n"));
+        // 二次调用不覆盖（对齐 TS：already exists）
+        std::fs::write(&p1, "user content").unwrap();
+        let (_, created2) = init_mcode_doc(&dir).unwrap();
+        assert!(!created2);
+        assert_eq!(std::fs::read_to_string(&p1).unwrap(), "user content");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

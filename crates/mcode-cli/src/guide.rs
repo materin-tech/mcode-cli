@@ -255,7 +255,11 @@ pub fn draw(f: &mut ratatui::Frame, area: Rect, guide: &Guide) {
                 } else {
                     Color::Cyan
                 };
-                lines.push(Line::from(sel_span(i == guide.select_index, label_of(m), color)));
+                lines.push(Line::from(sel_span(
+                    i == guide.select_index,
+                    label_of(m),
+                    color,
+                )));
             }
         }
     }
