@@ -69,6 +69,18 @@ async fn async_run(cfg: Config, cwd: std::path::PathBuf, preload: Preload) -> Re
         mcode_core::agent::history::HistoryStore::default(),
     ));
     let mut app = ChatApp::new(cfg.clone(), cwd.clone(), hist);
+    // 顶部横幅提示（对齐 TS Banner：version/cwd/model/mode + hint）
+    app.transcript.items.push(crate::chat::ChatItem::System {
+        text: format!(
+            "▛▀▘ MCode v{} · {} · {} · {}\n{}",
+            app.version,
+            cwd.display(),
+            cfg.active_model().unwrap_or_else(|| "no model".into()),
+            cfg.default_mode.label(),
+            crate::locales::strings(cfg.language).banner_hint
+        ),
+        error: false,
+    });
     for tier in &materialized {
         app.transcript.items.push(crate::chat::ChatItem::System {
             text: format!("✓ 内置资产已物化 {tier} → ~/.mcode/assets"),
@@ -796,8 +808,14 @@ fn draw_transcript(f: &mut ratatui::Frame, area: Rect, ui: &mut UiState) {
                 ListItem::new(Line::from(Span::styled(desc, style)))
             })
             .collect();
+        // 面板标题按触发器区分（对齐 TS InputBox：trigger === '/' ? slashHint : atHint）
+        let t = crate::locales::strings(ui.app.cfg.language);
+        let hint = match ui.completion.trigger {
+            Some(Trigger::Slash) => t.slash_hint,
+            _ => t.at_hint,
+        };
         let list = List::new(items).block(Block::default().borders(Borders::ALL).title(
-            Span::styled(" Tab 补全 ", Style::default().fg(Color::DarkGray)),
+            Span::styled(format!(" {hint} "), Style::default().fg(Color::DarkGray)),
         ));
         f.render_widget(list, chunks[1]);
     }
@@ -854,7 +872,8 @@ fn draw_status(f: &mut ratatui::Frame, area: Rect, ui: &UiState) {
     };
     let right = Line::from(Span::styled(
         format!(
-            "mode: {} (shift+tab) · ctrl+o reasoning ",
+            "{}: {} (shift+tab) · ctrl+o reasoning ",
+            crate::locales::strings(ui.app.cfg.language).mode_hint,
             ui.app.mode.label()
         ),
         mode_style,

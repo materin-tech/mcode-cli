@@ -3,7 +3,10 @@
 
 use mcode_core::config::Language;
 
-/// 全量键集（对齐 TS StringKey；字段顺序即表构造顺序）
+/// 全量键集（对齐 TS StringKey；字段顺序即表构造顺序）。
+/// allow(dead_code)：TS locales.ts 中 inputPlaceholder/thinking/toolRunning/errorPrefix/mode_*
+/// 亦为"定义未消费"的完整性键，表保持全量以维持"新增语言 = 加一张表"的扩展口径。
+#[allow(dead_code)]
 pub struct Strings {
     pub banner_hint: &'static str,
     pub input_placeholder: &'static str,

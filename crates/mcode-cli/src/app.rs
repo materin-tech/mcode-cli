@@ -135,7 +135,15 @@ impl ChatApp {
     pub fn prepare_turn(&mut self, raw: &str) -> Option<Turn> {
         // 每回合检查 provider（对齐 TS providerIssue 不缓存）
         if let Err(e) = self.cfg.provider_ready() {
-            self.notice(format!("✗ {e:#}"), true);
+            // API key 缺失走 locale 文案（对齐 TS `${noApiKeyWarning}（${env}）`）
+            let t = crate::locales::strings(self.cfg.language);
+            let msg = match self.cfg.active_provider() {
+                Some(p) if p.resolve_api_key().is_none() => {
+                    format!("✗ {}（{}）", t.no_api_key_warning, p.api_key_env)
+                }
+                _ => format!("✗ {e:#}"),
+            };
+            self.notice(msg, true);
             return None;
         }
         let mut attachments = vec![];
@@ -750,8 +758,10 @@ mod tests {
         let mut a = app();
         assert!(matches!(a.submit("/status"), Effect::None));
         assert!(matches!(a.submit("/no-such-cmd"), Effect::None));
+        // 未知指令文案走 locale 表（对齐 TS createCommands 兜底），不断言死翻译
+        let not_found = crate::locales::strings(a.cfg.language).command_not_found;
         assert!(a.transcript.items.iter().any(
-            |i| matches!(i, crate::chat::ChatItem::System { text, .. } if text.contains("暂未支持"))
+            |i| matches!(i, crate::chat::ChatItem::System { text, .. } if text.contains(not_found))
         ));
     }
 
