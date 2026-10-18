@@ -919,7 +919,7 @@ dependencies = [
 
 [[package]]
 name = "mcode-cli"
-version = "0.1.0"
+version = "0.1.0-beta"
 dependencies = [
  "anyhow",
  "chrono",
@@ -934,7 +934,7 @@ dependencies = [
 
 [[package]]
 name = "mcode-core"
-version = "0.1.0"
+version = "0.1.0-beta"
 dependencies = [
  "anyhow",
  "async-trait",
