@@ -537,12 +537,26 @@ impl ChatApp {
                 return crate::manage::run(self, &cmd, arg);
             }
             "/agents" => {
-                let names: Vec<String> = self.agents.iter().map(|a| a.name.clone()).collect();
+                // 对齐桌面版扩展页：名字 + 来源（user 可移除 / builtin）+ 描述
+                let user_dir = mcode_core::util::mcode_dir().join("agents");
+                let lines: Vec<String> = self
+                    .agents
+                    .iter()
+                    .map(|a| {
+                        let src = if user_dir.join(format!("{}.md", a.name)).is_file() {
+                            "user"
+                        } else {
+                            "builtin"
+                        };
+                        let desc: String = a.description.chars().take(52).collect();
+                        format!("  • {} [{src}] {desc}", a.name)
+                    })
+                    .collect();
                 self.notice(
                     format!(
-                        "可用 subagent（{}）— 经 task 工具或自动拆解调度：\n{}",
-                        names.len(),
-                        names.join("\n")
+                        "可用 subagent（{}）— 经 task 工具或自动拆解调度，/agent create|install|remove 管理：\n{}",
+                        self.agents.len(),
+                        lines.join("\n")
                     ),
                     false,
                 );

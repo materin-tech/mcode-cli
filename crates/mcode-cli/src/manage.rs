@@ -158,10 +158,21 @@ fn skill(app: &mut ChatApp, arg: &str) -> Effect {
     let rest = rest.trim();
     match sub {
         "" => {
-            app.notice(
-                "用法：/skill create <名称> <描述...> | install <目录> | remove <名称>",
-                true,
-            );
+            // 列表优先（对齐桌面扩展页）；管理动作用法在尾部提示
+            let list: Vec<String> = app
+                .skills
+                .iter()
+                .map(|s| format!("  • {} [{}]", s.entry.name, s.entry.source))
+                .collect();
+            let mut lines = vec![format!(
+                "已加载技能（{}）— /skill create <名称> <描述> | install <目录> | remove <名称>：",
+                app.skills.len()
+            )];
+            lines.extend(list.iter().take(30).cloned());
+            if list.len() > 30 {
+                lines.push(format!("  … 还有 {} 条", list.len() - 30));
+            }
+            app.notice(lines.join("\n"), false);
         }
         "create" => {
             // create <name> <description...>；正文给最小模板，用户随后自行编辑
@@ -237,9 +248,27 @@ fn agent(app: &mut ChatApp, arg: &str) -> Effect {
     let rest = rest.trim();
     match sub {
         "" => {
+            let user_dir = mcode_core::util::mcode_dir().join("agents");
+            let lines: Vec<String> = app
+                .agents
+                .iter()
+                .map(|a| {
+                    let src = if user_dir.join(format!("{}.md", a.name)).is_file() {
+                        "user"
+                    } else {
+                        "builtin"
+                    };
+                    let desc: String = a.description.chars().take(52).collect();
+                    format!("  • {} [{src}] {desc}", a.name)
+                })
+                .collect();
             app.notice(
-                "用法：/agent create <名称> <描述...> | install <.md 文件> | remove <名称>",
-                true,
+                format!(
+                    "可用 subagent（{}）— /agent create <名称> <描述> | install <.md> | remove <名称>：\n{}",
+                    app.agents.len(),
+                    lines.join("\n")
+                ),
+                false,
             );
         }
         "create" => {
