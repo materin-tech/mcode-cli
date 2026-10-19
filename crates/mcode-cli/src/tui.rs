@@ -873,11 +873,13 @@ fn draw_transcript(f: &mut ratatui::Frame, area: Rect, ui: &mut UiState) {
 
     if panel_h > 0 {
         let sel = ui.completion.selected;
-        let items: Vec<ListItem> = cands
+        // 滑动窗口：候选项超过 8 条时随选中项滚动，选中项始终可见
+        let (start, end) = completion_window(cands.len(), sel, 8);
+        let items: Vec<ListItem> = cands[start..end]
             .iter()
             .enumerate()
             .map(|(i, c)| {
-                let style = if i == sel {
+                let style = if start + i == sel {
                     Style::default().bg(Color::DarkGray).fg(Color::White)
                 } else {
                     Style::default()
@@ -1129,6 +1131,20 @@ fn normalize_paste(text: &str) -> String {
     text.replace("\r\n", "\n").replace('\r', "\n")
 }
 
+/// 补全面板滑动窗口：候选项超过 max 时面板整体滚动，选中项始终可见
+/// （对齐 TS CompletionPanel 的 start = max(0, min(sel - max + 1, len - max))）。
+/// 返回渲染切片区间 (start, end)。
+fn completion_window(len: usize, sel: usize, max: usize) -> (usize, usize) {
+    if len == 0 || max == 0 {
+        return (0, 0);
+    }
+    if len <= max {
+        return (0, len);
+    }
+    let start = (sel + 1).saturating_sub(max).min(len - max);
+    (start, start + max)
+}
+
 /// 字符游标 → (行, 列)：行按 \n 计，列为行内字符偏移
 fn input_row_col(input: &str, cursor: usize) -> (usize, usize) {
     let mut row = 0usize;
@@ -1233,6 +1249,23 @@ mod paste_tests {
         assert_eq!(normalize_paste("a\r\nb\rc"), "a\nb\nc");
         assert_eq!(normalize_paste("plain"), "plain");
         assert_eq!(normalize_paste(""), "");
+    }
+
+    #[test]
+    fn completion_window_shows_all_when_under_max() {
+        assert_eq!(completion_window(0, 0, 8), (0, 0));
+        assert_eq!(completion_window(5, 3, 8), (0, 5));
+        assert_eq!(completion_window(8, 7, 8), (0, 8));
+    }
+
+    #[test]
+    fn completion_window_scrolls_to_keep_selection_visible() {
+        // 12 个候选项、可见 8 条：选中前 8 条窗口钉在头部
+        assert_eq!(completion_window(12, 0, 8), (0, 8));
+        assert_eq!(completion_window(12, 7, 8), (0, 8));
+        // 选中越过后 8 条起，窗口整体下滚，选中项始终在窗内
+        assert_eq!(completion_window(12, 8, 8), (1, 9));
+        assert_eq!(completion_window(12, 11, 8), (4, 12));
     }
 
     #[test]
