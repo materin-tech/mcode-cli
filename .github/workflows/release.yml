@@ -21,6 +21,9 @@ jobs:
           - target: x86_64-unknown-linux-musl
             os: ubuntu-latest
             archive: tar.gz
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+            archive: tar.gz
           - target: aarch64-apple-darwin
             os: macos-14
             archive: tar.gz
@@ -39,7 +42,7 @@ jobs:
         with:
           key: ${{ matrix.target }}
       - name: Install musl tools
-        if: matrix.target == 'x86_64-unknown-linux-musl'
+        if: contains(matrix.target, 'musl')
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
         run: cargo build --release --target ${{ matrix.target }}
@@ -83,4 +86,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/mcode-* \
             --title "mcode $GITHUB_REF_NAME" \
-            --notes "预编译二进制（linux-musl / macOS arm64 / windows x64+arm64）。见 README 获取 config.json schema 说明。"
+            --notes "预编译二进制（linux-musl x64+arm64 / macOS arm64 / windows x64+arm64）。见 README 获取 config.json schema 说明。"
