@@ -27,6 +27,9 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
             archive: zip
+          - target: aarch64-pc-windows-msvc
+            os: windows-latest
+            archive: zip
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -80,4 +83,4 @@ jobs:
         run: |
           gh release create "$GITHUB_REF_NAME" dist/mcode-* \
             --title "mcode $GITHUB_REF_NAME" \
-            --notes "预编译二进制（linux-musl / macOS arm64 / windows）。见 README 获取 config.json schema 说明。"
+            --notes "预编译二进制（linux-musl / macOS arm64 / windows x64+arm64）。见 README 获取 config.json schema 说明。"
