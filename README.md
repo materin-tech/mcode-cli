@@ -1,16 +1,18 @@
-# mcode-rs
+# mcode-cli
 
 终端 AI coding agent —— 纯 Rust 实现，单一静态二进制，无 Node/React 依赖。
 
 对齐 mcode（TypeScript/Ink 版）的产品语义：OpenAI Responses API 流式、工具循环、技能与斜杠指令、会话持久化。
 
+核心逻辑沉淀在独立内核仓库 [mcode-core](https://github.com/materin-tech/mcode-core)（agent / tools / config / sessions / permission / hooks / mcp / skills），本仓库只保留 TUI shell。
+
 ## 特性
 
-- **Agent 循环**：单回合最多 25 轮工具调用自动回喂；流式错误指数退避重试（10 次）；≥100k token 自动压缩历史；ESC 随时打断
+- **Agent 循环**：单回合最多 25 轮工具调用自动回喂；流式错误指数退避重试（10 次）；上下文达模型窗口 80% 自动压缩；ESC 随时打断
 - **内置工具**：read_file / write_file / edit_file / bash / glob / grep / webfetch / websearch / task（subagent）
 - **斜杠指令**：`/model` `/token` `/language` `/effort` `/compact` `/resume` `/goal` `/pua` `/skills` 等
 - **技能系统**：安装包自带技能集（启动时自动物化到 `~/.mcode/assets`），`/<skill-name>` 直接调用，`/` 唤起补全面板
-- **会话**：自动持久化（JSONL）+ 跨项目恢复（`--continue` / `--resume`）
+- **会话**：自动持久化（JSONL）+ 跨项目恢复（`--continue` / `--resume`）+ 保留期自动清理（默认 90 天未活动即删除，`sessionRetentionDays` 可调）
 - **权限四模式**：manual / auto / plan / passon（shift+tab 切换）
 - **扩展**：hooks（PreToolUse / PostToolUse / Stop）、MCP server、subagent 定义
 - **多语言 UI**：zh_CN / zh_TW / en_US / ja_JP / ko_KR
@@ -51,7 +53,8 @@ mcode token           # token 用量统计
       "multimodalModels": []
     }
   ],
-  "defaultMode": "passon"
+  "defaultMode": "passon",
+  "sessionRetentionDays": 90
 }
 ```
 
@@ -72,6 +75,8 @@ cargo test            # 全量测试
 cargo clippy --workspace --all-targets
 cargo fmt --all
 ```
+
+核心内核改动在 [mcode-core](https://github.com/materin-tech/mcode-core) 仓库进行；本地联调时在 `~/.cargo/config.toml` 配置 `[patch]` 指向本地 core 副本，改完推 tag 后升级本仓库的依赖 tag。
 
 ## License
 
