@@ -31,8 +31,13 @@ pub struct Candidate {
 }
 
 impl CompletionState {
-    /// 根据光标前最后一个 token 更新触发状态（对齐 prototype 的 updateTrigger 正则语义）
+    /// 根据光标前最后一个 token 更新触发状态（对齐 prototype 的 updateTrigger 正则语义）。
+    /// 输入以空白结尾 = 当前 token 已补完（如 @ 选中文件后的空格）→ 面板关闭。
     pub fn sync_from_input(&mut self, input: &str) {
+        if input.ends_with(char::is_whitespace) {
+            self.close();
+            return;
+        }
         let token = input.split_whitespace().next_back().unwrap_or("");
         let mut chars = token.chars();
         match (chars.next(), input.is_empty()) {
@@ -69,8 +74,9 @@ impl CompletionState {
         }
     }
 
-    /// tab/enter 补全：返回替换后的完整输入
-    pub fn apply(&self, input: &str, candidate_name: &str) -> String {
+    /// tab/enter 补全：返回替换后的完整输入。
+    /// @ 目录不带尾随空格（面板进入该目录展示下一层）；@ 文件带尾随空格（面板关闭）。
+    pub fn apply(&self, input: &str, cand: &Candidate) -> String {
         let Some(t) = self.trigger else {
             return input.to_string();
         };
@@ -78,9 +84,14 @@ impl CompletionState {
             Trigger::Slash => "/",
             Trigger::At => "@",
         };
+        let suffix = if t == Trigger::At && cand.is_dir {
+            ""
+        } else {
+            " "
+        };
         match input.rsplit_once(char::is_whitespace) {
-            Some((head, _)) => format!("{head} {prefix}{candidate_name} "),
-            None => format!("{}{} ", prefix, candidate_name),
+            Some((head, _)) => format!("{head} {prefix}{}{suffix}", cand.name),
+            None => format!("{}{}{suffix}", prefix, cand.name),
         }
     }
 
@@ -168,8 +179,57 @@ mod tests {
         let mut st = CompletionState::default();
         st.sync_from_input("看下 @src/ap");
         assert_eq!(st.trigger, Some(Trigger::At));
-        let out = st.apply("看下 @src/ap", "src/api/client.ts");
+        let file = Candidate {
+            name: "src/api/client.ts".into(),
+            desc: String::new(),
+            is_dir: false,
+        };
+        let out = st.apply("看下 @src/ap", &file);
         assert_eq!(out, "看下 @src/api/client.ts ");
+    }
+
+    #[test]
+    fn at_apply_dir_descends_without_closing() {
+        let mut st = CompletionState::default();
+        st.sync_from_input("@src");
+        let dir = Candidate {
+            name: "src/".into(),
+            desc: String::new(),
+            is_dir: true,
+        };
+        let out = st.apply("@src", &dir);
+        assert_eq!(out, "@src/");
+        // 目录补全后面板仍开着，查询指向该目录
+        st.sync_from_input(&out);
+        assert_eq!(st.trigger, Some(Trigger::At));
+        assert_eq!(st.query, "src/");
+    }
+
+    #[test]
+    fn at_apply_file_closes_panel() {
+        let mut st = CompletionState::default();
+        st.sync_from_input("@src/ma");
+        let file = Candidate {
+            name: "src/main.rs".into(),
+            desc: String::new(),
+            is_dir: false,
+        };
+        let out = st.apply("@src/ma", &file);
+        assert_eq!(out, "@src/main.rs ");
+        // 文件补全后输入带尾随空格 → 面板关闭（其余候选项隐藏）
+        st.sync_from_input(&out);
+        assert_eq!(st.trigger, None);
+    }
+
+    #[test]
+    fn trailing_whitespace_closes_panel() {
+        let mut st = CompletionState::default();
+        st.sync_from_input("@src");
+        assert_eq!(st.trigger, Some(Trigger::At));
+        st.sync_from_input("@src ");
+        assert_eq!(st.trigger, None);
+        st.sync_from_input("/to ");
+        assert_eq!(st.trigger, None);
     }
 
     #[test]

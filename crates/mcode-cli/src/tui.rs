@@ -364,6 +364,36 @@ impl UiState {
 }
 
 /// 补全候选（/ 指令目录 或 @ 工作区文件）
+/// @ 候选：只展示查询目录的立即子项（对齐 Claude Code 的层级下钻）。
+/// query 按最后一个 '/' 拆成目录前缀 + 层内过滤词："" → 根目录一层；
+/// "src/" → src 的子项；"src/ma" → src 子项中含 "ma" 的。目录候选带尾随 '/'。
+fn at_candidates(files: &[String], query: &str) -> Vec<mcode_core::agent::completion::Candidate> {
+    use mcode_core::agent::completion::Candidate;
+    let q = query.to_lowercase();
+    let (dir, filter) = match q.rfind('/') {
+        Some(i) => (&q[..i + 1], &q[i + 1..]),
+        None => ("", q.as_str()),
+    };
+    files
+        .iter()
+        .filter(|f| {
+            if !f.to_lowercase().starts_with(dir) || f.len() <= dir.len() {
+                return false;
+            }
+            let name = &f[dir.len()..];
+            let core = name.strip_suffix('/').unwrap_or(name);
+            // 立即子项：名字部分不含更深的 '/'
+            !core.contains('/') && (filter.is_empty() || core.to_lowercase().contains(filter))
+        })
+        .take(50)
+        .map(|f| Candidate {
+            name: f.clone(),
+            desc: String::new(),
+            is_dir: f.ends_with('/'),
+        })
+        .collect()
+}
+
 fn candidates(ui: &UiState) -> Vec<mcode_core::agent::completion::Candidate> {
     use mcode_core::agent::completion::Candidate;
     match ui.completion.trigger {
@@ -392,24 +422,14 @@ fn candidates(ui: &UiState) -> Vec<mcode_core::agent::completion::Candidate> {
             }
             out
         }
-        Some(Trigger::At) => {
-            let q = ui.completion.query.to_lowercase();
-            ui.files
-                .iter()
-                .filter(|f| q.is_empty() || f.to_lowercase().contains(&q))
-                .take(50)
-                .map(|f| Candidate {
-                    name: f.clone(),
-                    desc: String::new(),
-                    is_dir: f.ends_with('/'),
-                })
-                .collect()
-        }
+        Some(Trigger::At) => at_candidates(&ui.files, &ui.completion.query),
         None => vec![],
     }
 }
 
 /// workspace 文件清单：前 2 层目录、上限 200（对齐 util/files.ts listWorkspaceFiles）
+/// @ 候选的工作区扫描：有界递归（深度 8、总量 200），目录带尾随 '/'。
+/// 层级展示交给 at_candidates 按查询目录逐层过滤，这里只攒全量扁平表。
 fn list_workspace_files(cwd: &std::path::Path) -> Vec<String> {
     const SKIP: [&str; 6] = [
         "node_modules",
@@ -419,43 +439,33 @@ fn list_workspace_files(cwd: &std::path::Path) -> Vec<String> {
         ".DS_Store",
         "__pycache__",
     ];
-    let mut out = vec![];
-    let Ok(rd) = std::fs::read_dir(cwd) else {
-        return out;
-    };
-    let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
-    entries.sort_by_key(|e| e.file_name());
-    for e in entries {
-        let name = e.file_name().to_string_lossy().to_string();
-        if SKIP.contains(&name.as_str()) || name.starts_with('.') {
-            continue;
+    const MAX_DEPTH: usize = 8;
+    const MAX_ENTRIES: usize = 200;
+    fn walk(dir: &std::path::Path, prefix: &str, depth: usize, out: &mut Vec<String>) {
+        if depth >= MAX_DEPTH || out.len() >= MAX_ENTRIES {
+            return;
         }
-        let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            out.push(format!("{name}/"));
-            // 第二层
-            if let Ok(sub) = std::fs::read_dir(e.path()) {
-                let mut subs: Vec<_> = sub.filter_map(|x| x.ok()).collect();
-                subs.sort_by_key(|x| x.file_name());
-                for s in subs {
-                    let sn = s.file_name().to_string_lossy().to_string();
-                    if SKIP.contains(&sn.as_str()) || sn.starts_with('.') {
-                        continue;
-                    }
-                    let sdir = s.file_type().map(|t| t.is_dir()).unwrap_or(false);
-                    out.push(format!("{name}/{sn}{}", if sdir { "/" } else { "" }));
-                    if out.len() >= 200 {
-                        return out;
-                    }
-                }
+        let Ok(rd) = std::fs::read_dir(dir) else {
+            return;
+        };
+        let mut entries: Vec<_> = rd.filter_map(|e| e.ok()).collect();
+        entries.sort_by_key(|e| e.file_name());
+        for e in entries {
+            let name = e.file_name().to_string_lossy().to_string();
+            if SKIP.contains(&name.as_str()) || name.starts_with('.') || out.len() >= MAX_ENTRIES {
+                continue;
             }
-        } else {
-            out.push(name);
-        }
-        if out.len() >= 200 {
-            break;
+            let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
+            if is_dir {
+                out.push(format!("{prefix}{name}/"));
+                walk(&e.path(), &format!("{prefix}{name}/"), depth + 1, out);
+            } else {
+                out.push(format!("{prefix}{name}"));
+            }
         }
     }
+    let mut out = vec![];
+    walk(cwd, "", 0, &mut out);
     out
 }
 
@@ -588,8 +598,7 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
             }
             KeyCode::Tab => {
                 let sel = ui.completion.selected.min(cands.len() - 1);
-                let name = cands[sel].name.clone();
-                ui.input = ui.completion.apply(&ui.input, &name);
+                ui.input = ui.completion.apply(&ui.input, &cands[sel]);
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
                 return false;
@@ -1256,6 +1265,56 @@ mod paste_tests {
         assert_eq!(completion_window(0, 0, 8), (0, 0));
         assert_eq!(completion_window(5, 3, 8), (0, 5));
         assert_eq!(completion_window(8, 7, 8), (0, 8));
+    }
+
+    #[test]
+    fn at_candidates_show_only_first_level_on_at() {
+        let files = vec![
+            "README.md".to_string(),
+            "src/".to_string(),
+            "src/api/".to_string(),
+            "src/api/client.ts".to_string(),
+            "src/main.rs".to_string(),
+        ];
+        let cands1 = at_candidates(&files, "");
+        let names: Vec<&str> = cands1.iter().map(|c| c.name.as_str()).collect();
+        // 只有一层：src 的子项不可见
+        assert_eq!(names, vec!["README.md", "src/"]);
+    }
+
+    #[test]
+    fn at_candidates_descend_into_selected_dir() {
+        let files = vec![
+            "README.md".to_string(),
+            "src/".to_string(),
+            "src/api/".to_string(),
+            "src/api/client.ts".to_string(),
+            "src/main.rs".to_string(),
+        ];
+        // 选中 src/ 后查询变 "src/"：展示第二层
+        let cands2 = at_candidates(&files, "src/");
+        let names: Vec<&str> = cands2.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["src/api/", "src/main.rs"]);
+        // 第三层同理
+        let cands3 = at_candidates(&files, "src/api/");
+        let names: Vec<&str> = cands3.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["src/api/client.ts"]);
+    }
+
+    #[test]
+    fn at_candidates_filter_within_level() {
+        let files = vec![
+            "src/".to_string(),
+            "src/main.rs".to_string(),
+            "src/models/".to_string(),
+        ];
+        let cands4 = at_candidates(&files, "src/ma");
+        let names: Vec<&str> = cands4.iter().map(|c| c.name.as_str()).collect();
+        // 过滤词只作用于当前层，且大小写不敏感
+        assert_eq!(names, vec!["src/main.rs"]);
+        let cands5 = at_candidates(&files, "SRC/MO");
+        let names: Vec<&str> = cands5.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, vec!["src/models/"]);
     }
 
     #[test]
