@@ -127,6 +127,9 @@ async fn async_run(cfg: Config, cwd: std::path::PathBuf, preload: Preload) -> Re
 
     // 终端
     let mut terminal = ratatui::init();
+    // 括号粘贴模式：终端把整段粘贴包成单个 Event::Paste（ESC[200~…ESC[201~），
+    // 粘贴里的换行不会被抓成回车键逐行提交（对齐 TS 版多行粘贴；不支持的老终端行为不变）
+    let _ = crossterm::execute!(stdout(), crossterm::event::EnableBracketedPaste);
     // 按键线程：阻塞读 → mpsc
     let (key_tx, mut key_rx) = tokio::sync::mpsc::unbounded_channel();
     std::thread::spawn(move || {
@@ -186,6 +189,7 @@ async fn async_run(cfg: Config, cwd: std::path::PathBuf, preload: Preload) -> Re
         }
     }
 
+    let _ = crossterm::execute!(stdout(), crossterm::event::DisableBracketedPaste);
     ratatui::restore();
     Ok(())
 }
@@ -394,7 +398,7 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
     let key = match ev {
         Event::Key(k) => k,
         Event::Paste(text) => {
-            ui.insert(&text);
+            ui.insert(&normalize_paste(&text));
             return false;
         }
         Event::Resize(_, _) => return false,
@@ -734,9 +738,10 @@ fn current_effort() -> ThinkingEffort {
 
 fn draw(f: &mut ratatui::Frame, ui: &mut UiState) {
     let area = f.area();
+    // 输入框高度随内容行数自适应（多行粘贴整块进入，框体随之长高）
     let chunks = Layout::vertical([
         Constraint::Min(0),
-        Constraint::Length(3),
+        Constraint::Length(input_box_height(&ui.input, INPUT_MAX_ROWS)),
         Constraint::Length(1),
     ])
     .split(area);
@@ -826,24 +831,53 @@ fn draw_transcript(f: &mut ratatui::Frame, area: Rect, ui: &mut UiState) {
 
 fn draw_input(f: &mut ratatui::Frame, area: Rect, ui: &UiState) {
     let prefix = if ui.app.busy { "… " } else { "> " };
-    let shown = format!("{}{}", prefix, ui.input);
     let (title, tcolor) = if ui.app.busy {
         (" Esc 打断 ", Color::Red)
     } else {
         (" 输入 ", Color::DarkGray)
     };
-    let para = Paragraph::new(shown).block(
-        Block::default()
-            .borders(Borders::ALL)
-            .title(Span::styled(title, Style::default().fg(tcolor))),
-    );
-    // 假光标：ratatui 提供 cursor 定位（terminal.show_cursor 配合），这里用反色 span 近似
+    // 多行输入：首行带提示符，后续行两格缩进（\n 是文本换行，不是提交）
+    let lines: Vec<Line> = ui
+        .input
+        .split('\n')
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                Line::from(format!("{prefix}{l}"))
+            } else {
+                Line::from(format!("  {l}"))
+            }
+        })
+        .collect();
+    let visible = area.height.saturating_sub(2) as usize;
+    let (crow, ccol) = input_row_col(&ui.input, ui.cursor);
+    // 光标行超出可视区时滚动，保证光标始终可见
+    let top = if visible == 0 || crow < visible {
+        0
+    } else {
+        crow + 1 - visible
+    };
+    let para = Paragraph::new(ratatui::text::Text::from(lines))
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(Span::styled(title, Style::default().fg(tcolor))),
+        )
+        .scroll((top as u16, 0));
     f.render_widget(para, area);
-    // 真实光标定位（反色单元格近似）
-    let inner_x = area.x + 1 + (prefix.chars().count() + ui.cursor) as u16;
-    let clamped_x = inner_x.min(area.x + area.width.saturating_sub(2));
-    if let Some(cell) = f.buffer_mut().cell_mut((clamped_x, area.y + 1)) {
-        cell.set_style(Style::default().bg(Color::Gray).fg(Color::Black));
+    // 真实光标定位（反色单元格近似），随行/列移动
+    let row = crow.saturating_sub(top) as u16;
+    if row < visible as u16 {
+        let indent = if crow == 0 {
+            prefix.chars().count() as u16
+        } else {
+            2
+        };
+        let x = (area.x + 1 + indent + ccol as u16).min(area.x + area.width.saturating_sub(2));
+        let y = area.y + 1 + row;
+        if let Some(cell) = f.buffer_mut().cell_mut((x, y)) {
+            cell.set_style(Style::default().bg(Color::Gray).fg(Color::Black));
+        }
     }
 }
 
@@ -1010,5 +1044,71 @@ pub(crate) fn centered_rect(percent_x: u16, height: u16, r: Rect) -> Rect {
         y,
         width: w,
         height: h,
+    }
+}
+
+/// 粘贴内容换行归一：\r\n / \r → \n。
+/// 换行是文本（输入框内换行显示），只有回车键（KeyCode::Enter）才提交——
+/// 对齐 TS 版多行粘贴语义（回车键 ≠ 换行符）。
+fn normalize_paste(text: &str) -> String {
+    text.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+/// 字符游标 → (行, 列)：行按 \n 计，列为行内字符偏移
+fn input_row_col(input: &str, cursor: usize) -> (usize, usize) {
+    let mut row = 0usize;
+    let mut col = 0usize;
+    for (i, ch) in input.chars().enumerate() {
+        if i >= cursor {
+            break;
+        }
+        if ch == '\n' {
+            row += 1;
+            col = 0;
+        } else {
+            col += 1;
+        }
+    }
+    (row, col)
+}
+
+/// 输入框总高度 = 内容行数（至少 1，封顶 max_rows）+ 上下边框 2
+fn input_box_height(input: &str, max_rows: u16) -> u16 {
+    let rows = input.split('\n').count() as u16;
+    rows.max(1).min(max_rows.max(1)) + 2
+}
+
+/// 输入框内容行数上限（超出后内部滚动，避免长粘贴吃满整屏）
+const INPUT_MAX_ROWS: u16 = 12;
+
+#[cfg(test)]
+mod paste_tests {
+    use super::*;
+
+    #[test]
+    fn paste_normalizes_crlf_and_cr_to_lf() {
+        assert_eq!(normalize_paste("a\r\nb\rc"), "a\nb\nc");
+        assert_eq!(normalize_paste("plain"), "plain");
+        assert_eq!(normalize_paste(""), "");
+    }
+
+    #[test]
+    fn input_row_col_maps_cursor_across_lines() {
+        assert_eq!(input_row_col("", 0), (0, 0));
+        assert_eq!(input_row_col("ab\ncd", 0), (0, 0));
+        assert_eq!(input_row_col("ab\ncd", 2), (0, 2));
+        // 游标落在 \n 之后 → 下一行行首
+        assert_eq!(input_row_col("ab\ncd", 3), (1, 0));
+        assert_eq!(input_row_col("ab\ncd", 5), (1, 2));
+        // 越界按末尾夹紧
+        assert_eq!(input_row_col("ab", 99), (0, 2));
+    }
+
+    #[test]
+    fn input_box_height_grows_with_lines_and_caps() {
+        assert_eq!(input_box_height("", 12), 3); // 1 行 + 上下边框
+        assert_eq!(input_box_height("a\nb\nc", 12), 5);
+        let many = "x\n".repeat(50);
+        assert_eq!(input_box_height(&many, 12), 14); // 封顶 12 + 2
     }
 }
