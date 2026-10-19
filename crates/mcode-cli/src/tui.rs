@@ -211,6 +211,10 @@ struct UiState {
     input: String,
     /// 光标位置（char 索引）
     cursor: usize,
+    /// 多行内容折叠展示（对齐主流终端 agent：单→多行跃迁即收起为单行预览）
+    input_collapsed: bool,
+    /// 上次编辑后内容是否为多行（单→多跃迁检测用）
+    prev_input_multi: bool,
     completion: CompletionState,
     input_history: InputHistory,
     reasoning_expanded: bool,
@@ -238,6 +242,8 @@ impl UiState {
             ui_rx,
             input: String::new(),
             cursor: 0,
+            input_collapsed: false,
+            prev_input_multi: false,
             completion: CompletionState::default(),
             input_history,
             reasoning_expanded: false,
@@ -255,6 +261,21 @@ impl UiState {
         self.completion.sync_from_input(&self.input);
     }
 
+    /// 内容变多行即折叠（单→多跃迁即收起）；已展开时继续编辑不再自动收起。
+    /// 所有改动 input 的路径末尾都要调用（insert/backspace/补全回填/历史回填）。
+    fn note_input_edited(&mut self) {
+        let is_multi = self.input.contains('\n');
+        if is_multi && !self.prev_input_multi {
+            self.input_collapsed = true;
+        }
+        self.prev_input_multi = is_multi;
+    }
+
+    /// 折叠态是否生效：折叠标志为真且内容确为多行
+    fn is_collapsed(&self) -> bool {
+        self.input_collapsed && self.input.contains('\n')
+    }
+
     fn insert(&mut self, s: &str) {
         let char_len = self.input.chars().count();
         let pos = self.cursor.min(char_len);
@@ -264,6 +285,7 @@ impl UiState {
         self.cursor = pos + s.chars().count();
         self.files = list_workspace_files(&self.app.cwd); // @ 触发时重扫（对齐 TS onAtTrigger）
         self.sync_completion();
+        self.note_input_edited();
     }
 
     fn backspace(&mut self) {
@@ -276,6 +298,7 @@ impl UiState {
         self.input = format!("{head}{tail}");
         self.cursor = pos - 1;
         self.sync_completion();
+        self.note_input_edited();
     }
 
     fn move_cursor(&mut self, delta: i32) {
@@ -287,6 +310,8 @@ impl UiState {
     fn take_input(&mut self) -> String {
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
+        self.input_collapsed = false;
+        self.prev_input_multi = false;
         self.completion.close();
         if !text.trim().is_empty() {
             self.input_history.push(text.trim().to_string());
@@ -524,6 +549,7 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
                 ui.input = ui.completion.apply(&ui.input, &name);
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
+                ui.note_input_edited();
                 return false;
             }
             _ => {}
@@ -538,22 +564,34 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
             return apply_effect(ui, effect).await.unwrap_or(false);
         }
         KeyCode::Up => {
-            // 有内容：跨行移动光标（文本编辑器语义）；空框：历史回填
+            // 有内容：折叠态先展开，否则跨行移动光标（文本编辑器语义）；空框：历史回填
             if !ui.input.is_empty() {
-                ui.cursor = cursor_vertical_move(&ui.input, ui.cursor, -1);
+                if ui.is_collapsed() {
+                    ui.input_collapsed = false;
+                } else {
+                    ui.cursor = cursor_vertical_move(&ui.input, ui.cursor, -1);
+                }
             } else if let Some(prev) = ui.input_history.recall_up(&ui.input) {
                 ui.input = prev;
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
+                ui.note_input_edited();
             }
         }
         KeyCode::Down => {
             if !ui.input.is_empty() {
-                ui.cursor = cursor_vertical_move(&ui.input, ui.cursor, 1);
+                // 光标已在末行且为多行：折叠（与 ↑ 展开对偶，形成闭环）
+                let next = cursor_vertical_move(&ui.input, ui.cursor, 1);
+                if next == ui.cursor && ui.input.contains('\n') {
+                    ui.input_collapsed = true;
+                } else {
+                    ui.cursor = next;
+                }
             } else if let Some(next) = ui.input_history.recall_down() {
                 ui.input = next;
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
+                ui.note_input_edited();
             }
         }
         KeyCode::Tab => { /* 无补全时忽略 */ }
@@ -591,8 +629,9 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
             ui.scroll_from_bottom = ui.scroll_from_bottom.saturating_add(10);
         }
         KeyCode::Backspace => ui.backspace(),
-        KeyCode::Left => ui.move_cursor(-1),
-        KeyCode::Right => ui.move_cursor(1),
+        // 折叠态内容视为整体：横移键不动（先 ↑ 展开），避免在不可见位置插入
+        KeyCode::Left if !ui.is_collapsed() => ui.move_cursor(-1),
+        KeyCode::Right if !ui.is_collapsed() => ui.move_cursor(1),
         KeyCode::Home => ui.cursor = 0,
         KeyCode::End => ui.cursor = ui.input.chars().count(),
         KeyCode::Char(c) => {
@@ -746,7 +785,11 @@ fn draw(f: &mut ratatui::Frame, ui: &mut UiState) {
     // 输入框高度随内容行数自适应（多行粘贴整块进入，框体随之长高）
     let chunks = Layout::vertical([
         Constraint::Min(0),
-        Constraint::Length(input_box_height(&ui.input, INPUT_MAX_ROWS)),
+        Constraint::Length(input_box_height(
+            &ui.input,
+            INPUT_MAX_ROWS,
+            ui.is_collapsed(),
+        )),
         Constraint::Length(1),
     ])
     .split(area);
@@ -841,21 +884,49 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, ui: &UiState) {
     } else {
         (" 输入 ", Color::DarkGray)
     };
-    // 多行输入：首行带提示符，后续行两格缩进（\n 是文本换行，不是提交）
-    let lines: Vec<Line> = ui
-        .input
-        .split('\n')
-        .enumerate()
-        .map(|(i, l)| {
-            if i == 0 {
-                Line::from(format!("{prefix}{l}"))
-            } else {
-                Line::from(format!("  {l}"))
-            }
-        })
-        .collect();
+    // 多行输入：首行带提示符，后续行两格缩进（\n 是文本换行，不是提交）；
+    // 折叠态只渲染首行 + 行数徽标（对齐主流终端 agent 的折叠输入）
+    let is_collapsed = ui.is_collapsed();
+    let collapsed_suffix = if is_collapsed {
+        Some(
+            crate::locales::strings(ui.app.cfg.language)
+                .input_collapsed_suffix
+                .replace("{n}", &((ui.input.split('\n').count() - 1).to_string())),
+        )
+    } else {
+        None
+    };
+    let lines: Vec<Line> = if let Some(suffix) = &collapsed_suffix {
+        let first = ui.input.split('\n').next().unwrap_or("");
+        vec![Line::from(format!("{prefix}{first}{suffix}"))]
+    } else {
+        ui.input
+            .split('\n')
+            .enumerate()
+            .map(|(i, l)| {
+                if i == 0 {
+                    Line::from(format!("{prefix}{l}"))
+                } else {
+                    Line::from(format!("  {l}"))
+                }
+            })
+            .collect()
+    };
     let visible = area.height.saturating_sub(2) as usize;
-    let (crow, ccol) = input_row_col(&ui.input, ui.cursor);
+    let (crow, ccol) = if is_collapsed {
+        // 折叠态光标钉在整行末尾（徽标之后）：列 = 首行显示宽度 + 徽标显示宽度
+        let first_width = ui
+            .input
+            .split('\n')
+            .next()
+            .map_or(0, unicode_width::UnicodeWidthStr::width);
+        let suffix_width = collapsed_suffix
+            .as_deref()
+            .map_or(0, unicode_width::UnicodeWidthStr::width);
+        (0, first_width + suffix_width)
+    } else {
+        input_row_col(&ui.input, ui.cursor)
+    };
     // 光标行超出可视区时滚动，保证光标始终可见
     let top = if visible == 0 || crow < visible {
         0
@@ -1100,9 +1171,13 @@ fn cursor_vertical_move(input: &str, cursor: usize, delta: i32) -> usize {
     prefix + target_col
 }
 
-/// 输入框总高度 = 内容行数（至少 1，封顶 max_rows）+ 上下边框 2
-fn input_box_height(input: &str, max_rows: u16) -> u16 {
-    let rows = input.split('\n').count() as u16;
+/// 输入框总高度 = 内容行数（至少 1，封顶 max_rows）+ 上下边框 2；折叠态恒为 1 行
+fn input_box_height(input: &str, max_rows: u16, collapsed: bool) -> u16 {
+    let rows = if collapsed {
+        1
+    } else {
+        input.split('\n').count() as u16
+    };
     rows.max(1).min(max_rows.max(1)) + 2
 }
 
@@ -1179,9 +1254,77 @@ mod paste_tests {
 
     #[test]
     fn input_box_height_grows_with_lines_and_caps() {
-        assert_eq!(input_box_height("", 12), 3); // 1 行 + 上下边框
-        assert_eq!(input_box_height("a\nb\nc", 12), 5);
+        assert_eq!(input_box_height("", 12, false), 3); // 1 行 + 上下边框
+        assert_eq!(input_box_height("a\nb\nc", 12, false), 5);
         let many = "x\n".repeat(50);
-        assert_eq!(input_box_height(&many, 12), 14); // 封顶 12 + 2
+        assert_eq!(input_box_height(&many, 12, false), 14); // 封顶 12 + 2
+    }
+
+    #[test]
+    fn input_box_height_collapsed_is_single_row() {
+        let many = "x\n".repeat(50);
+        assert_eq!(input_box_height(&many, 12, true), 3);
+    }
+}
+
+#[cfg(test)]
+mod collapse_tests {
+    use super::*;
+
+    #[test]
+    fn single_to_multi_transition_collapses() {
+        let mut ui = ui_for_test();
+        ui.insert("首行");
+        assert!(!ui.is_collapsed());
+        ui.insert("\n次行\n三行");
+        assert!(ui.is_collapsed());
+        // 已折叠时继续编辑不再改变折叠态
+        ui.insert("续");
+        assert!(ui.is_collapsed());
+    }
+
+    #[test]
+    fn expand_then_edit_stays_expanded() {
+        let mut ui = ui_for_test();
+        ui.insert("a\nb");
+        assert!(ui.is_collapsed());
+        ui.input_collapsed = false; // ↑ 展开后的状态
+        ui.insert("c");
+        assert!(!ui.is_collapsed());
+    }
+
+    #[test]
+    fn backspace_removing_last_newline_uncollapses_render() {
+        let mut ui = ui_for_test();
+        ui.insert("a\nb");
+        assert!(ui.is_collapsed());
+        ui.backspace();
+        assert_eq!(ui.input, "a\n");
+        assert!(ui.is_collapsed());
+        ui.backspace();
+        assert_eq!(ui.input, "a");
+        // 内容回到单行：折叠标志虽在，is_collapsed 以内容为准
+        assert!(!ui.is_collapsed());
+    }
+
+    #[test]
+    fn take_input_resets_collapse_state() {
+        let mut ui = ui_for_test();
+        ui.insert("a\nb");
+        ui.take_input();
+        assert!(!ui.input_collapsed);
+        assert!(!ui.prev_input_multi);
+    }
+
+    /// UiState::new 依赖 ChatApp/文件扫描，构造最小状态（同 app.rs 测试的 app() 口径）
+    fn ui_for_test() -> UiState {
+        let app = ChatApp::new(
+            Config::default(),
+            std::env::temp_dir(),
+            Arc::new(Mutex::new(
+                mcode_core::agent::history::HistoryStore::default(),
+            )),
+        );
+        UiState::new(app, None, false)
     }
 }
