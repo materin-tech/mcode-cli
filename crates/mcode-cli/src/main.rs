@@ -16,6 +16,7 @@ mod chat;
 mod guide;
 mod inputlog;
 mod locales;
+mod manage;
 mod runtime;
 mod tui;
 mod view;

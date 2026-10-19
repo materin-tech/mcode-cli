@@ -35,6 +35,9 @@ const IMPLEMENTED: &[&str] = &[
     "/goal",
     "/agents",
     "/skills",
+    "/skill",
+    "/agent",
+    "/provider",
     "/mcp",
     "/permissions",
     "/effort",
@@ -154,7 +157,7 @@ impl ChatApp {
             .unwrap_or(false)
     }
 
-    fn notice(&mut self, text: impl Into<String>, error: bool) {
+    pub(crate) fn notice(&mut self, text: impl Into<String>, error: bool) {
         self.transcript.items.push(crate::chat::ChatItem::System {
             text: text.into(),
             error,
@@ -530,6 +533,9 @@ impl ChatApp {
                     };
                 }
             }
+            "/provider" | "/skill" | "/agent" => {
+                return crate::manage::run(self, &cmd, arg);
+            }
             "/agents" => {
                 let names: Vec<String> = self.agents.iter().map(|a| a.name.clone()).collect();
                 self.notice(
@@ -571,6 +577,9 @@ impl ChatApp {
                 self.notice(lines.join("\n"), false);
             }
             "/mcp" => {
+                if let Some(eff) = crate::manage::run_mcp(self, arg) {
+                    return eff;
+                }
                 if let Some(h) = &self.harness {
                     if h.mcp_report.is_empty() {
                         self.notice(
