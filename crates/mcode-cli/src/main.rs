@@ -59,6 +59,16 @@ fn main() -> Result<()> {
     let cfg = load_config_for_tui()?;
     let cwd = std::env::current_dir()?;
 
+    // -- 会话生命周期：启动即清理超期会话（默认 90 天未活动，config.sessionRetentionDays 可调） --
+    let removed =
+        mcode_core::sessions::SessionStore::cleanup_expired(cfg.session_retention_days as u64);
+    if removed > 0 {
+        println!(
+            "🧹 已清理 {removed} 个超过 {} 天未活动的过期会话",
+            cfg.session_retention_days
+        );
+    }
+
     // --continue / --resume <id>：本地无会话时全局跨项目兜底（对齐 TS listAllSessions）
     let local = mcode_core::sessions::SessionStore::list(&cwd).unwrap_or_default();
 
