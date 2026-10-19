@@ -67,7 +67,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: dist-${{ matrix.target }}
-          path: mcode-*
+          path: |
+            mcode-*.tar.gz
+            mcode-*.zip
           if-no-files-found: error
 
   release:
