@@ -538,14 +538,19 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
             return apply_effect(ui, effect).await.unwrap_or(false);
         }
         KeyCode::Up => {
-            if let Some(prev) = ui.input_history.recall_up(&ui.input) {
+            // 有内容：跨行移动光标（文本编辑器语义）；空框：历史回填
+            if !ui.input.is_empty() {
+                ui.cursor = cursor_vertical_move(&ui.input, ui.cursor, -1);
+            } else if let Some(prev) = ui.input_history.recall_up(&ui.input) {
                 ui.input = prev;
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
             }
         }
         KeyCode::Down => {
-            if let Some(next) = ui.input_history.recall_down() {
+            if !ui.input.is_empty() {
+                ui.cursor = cursor_vertical_move(&ui.input, ui.cursor, 1);
+            } else if let Some(next) = ui.input_history.recall_down() {
                 ui.input = next;
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
@@ -1072,6 +1077,29 @@ fn input_row_col(input: &str, cursor: usize) -> (usize, usize) {
     (row, col)
 }
 
+/// 光标垂直跨行移动（文本编辑器语义）：保留列、目标列 clamp 到目标行行尾，
+/// 已在首行/末行则原地不动。delta 为 -1（上）/ 1（下）。
+fn cursor_vertical_move(input: &str, cursor: usize, delta: i32) -> usize {
+    let (row, col) = input_row_col(input, cursor);
+    let total = input.split('\n').count() as i32;
+    let target = (row as i32 + delta).clamp(0, total - 1);
+    if target == row as i32 {
+        return cursor;
+    }
+    let target = target as usize;
+    let target_col = input
+        .split('\n')
+        .nth(target)
+        .map_or(0, |l| l.chars().count())
+        .min(col);
+    let prefix: usize = input
+        .split('\n')
+        .take(target)
+        .map(|l| l.chars().count() + 1)
+        .sum();
+    prefix + target_col
+}
+
 /// 输入框总高度 = 内容行数（至少 1，封顶 max_rows）+ 上下边框 2
 fn input_box_height(input: &str, max_rows: u16) -> u16 {
     let rows = input.split('\n').count() as u16;
@@ -1080,6 +1108,51 @@ fn input_box_height(input: &str, max_rows: u16) -> u16 {
 
 /// 输入框内容行数上限（超出后内部滚动，避免长粘贴吃满整屏）
 const INPUT_MAX_ROWS: u16 = 12;
+
+#[cfg(test)]
+mod cursor_tests {
+    use super::*;
+
+    const MULTI: &str = "AB\nCD\nEF";
+
+    #[test]
+    fn up_moves_to_previous_line_clamping_column() {
+        // 光标在第三行 F 后（index 8）→ 上移到第二行，列 2 未超行尾 → C 后
+        assert_eq!(cursor_vertical_move(MULTI, 8, -1), 5);
+        // 第二行 D 后（index 5）→ 上移到第一行，列 2 → B 后
+        assert_eq!(cursor_vertical_move(MULTI, 5, -1), 2);
+        // 列超目标行尾时 clamp：光标在第二行列 2，上移到第一行（长 2）→ 列 2
+        assert_eq!(cursor_vertical_move("A\nBCD", 5, -1), 1);
+    }
+
+    #[test]
+    fn down_moves_to_next_line_clamping_column() {
+        assert_eq!(cursor_vertical_move(MULTI, 2, 1), 5);
+        assert_eq!(cursor_vertical_move(MULTI, 5, 1), 8);
+    }
+
+    #[test]
+    fn at_edges_cursor_stays_put() {
+        // 首行再上移、末行再下移 → 原地不动
+        assert_eq!(cursor_vertical_move(MULTI, 2, -1), 2);
+        assert_eq!(cursor_vertical_move(MULTI, 8, 1), 8);
+    }
+
+    #[test]
+    fn single_line_and_empty_input_are_noops() {
+        assert_eq!(cursor_vertical_move("hello", 3, -1), 3);
+        assert_eq!(cursor_vertical_move("hello", 3, 1), 3);
+        assert_eq!(cursor_vertical_move("", 0, -1), 0);
+        assert_eq!(cursor_vertical_move("", 0, 1), 0);
+    }
+
+    #[test]
+    fn cursor_on_newline_moves_from_row_end() {
+        // 光标停在第一行末（'\n' 上，index 2）→ 上移不动、下移到第二行行首列 clamp
+        assert_eq!(cursor_vertical_move(MULTI, 2, -1), 2);
+        assert_eq!(cursor_vertical_move(MULTI, 2, 1), 2 + 1 + 2);
+    }
+}
 
 #[cfg(test)]
 mod paste_tests {
