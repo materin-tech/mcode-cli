@@ -18,4 +18,3 @@ chrono = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
 include_dir = "0.7"
-unicode-width = "0.2"

@@ -211,10 +211,10 @@ struct UiState {
     input: String,
     /// 光标位置（char 索引）
     cursor: usize,
-    /// 多行内容折叠展示（对齐主流终端 agent：单→多行跃迁即收起为单行预览）
-    input_collapsed: bool,
-    /// 上次编辑后内容是否为多行（单→多跃迁检测用）
-    prev_input_multi: bool,
+    /// 多行粘贴登记表（token, content）：粘贴折叠为占位 token 入框，提交时展开还原全文
+    pastes: Vec<(String, String)>,
+    /// 下一个粘贴占位的编号（#1、#2…，会话内递增）
+    next_paste_id: usize,
     completion: CompletionState,
     input_history: InputHistory,
     reasoning_expanded: bool,
@@ -242,8 +242,8 @@ impl UiState {
             ui_rx,
             input: String::new(),
             cursor: 0,
-            input_collapsed: false,
-            prev_input_multi: false,
+            pastes: Vec::new(),
+            next_paste_id: 1,
             completion: CompletionState::default(),
             input_history,
             reasoning_expanded: false,
@@ -261,19 +261,53 @@ impl UiState {
         self.completion.sync_from_input(&self.input);
     }
 
-    /// 内容变多行即折叠（单→多跃迁即收起）；已展开时继续编辑不再自动收起。
-    /// 所有改动 input 的路径末尾都要调用（insert/backspace/补全回填/历史回填）。
-    fn note_input_edited(&mut self) {
-        let is_multi = self.input.contains('\n');
-        if is_multi && !self.prev_input_multi {
-            self.input_collapsed = true;
-        }
-        self.prev_input_multi = is_multi;
+    /// 登记一段多行粘贴，返回占位 token（对齐主流终端 agent：`[Pasted text #N +M lines]`）。
+    /// 行数按去尾换行后的内容计（"a\n" 视为 1 行）。
+    fn register_paste(&mut self, content: &str) -> String {
+        let id = self.next_paste_id;
+        self.next_paste_id += 1;
+        let trimmed = content.trim_end_matches('\n');
+        let lines = trimmed.split('\n').count();
+        let token = format!("[Pasted text #{id} +{lines} lines]");
+        self.pastes.push((token.clone(), content.to_string()));
+        token
     }
 
-    /// 折叠态是否生效：折叠标志为真且内容确为多行
-    fn is_collapsed(&self) -> bool {
-        self.input_collapsed && self.input.contains('\n')
+    /// 提交前展开：把输入中的占位 token 还原为粘贴全文
+    fn expand_tokens(&self, text: &str) -> String {
+        let mut out = text.to_string();
+        for (token, content) in &self.pastes {
+            if out.contains(token.as_str()) {
+                out = out.replace(token.as_str(), content);
+            }
+        }
+        out
+    }
+
+    /// 光标左侧是否恰好压在某个 token 末尾 → 返回该 token（整体删除用）
+    fn token_ending_at(&self, cursor: usize) -> Option<String> {
+        let prefix: String = self
+            .input
+            .chars()
+            .take(cursor.min(self.input.chars().count()))
+            .collect();
+        self.pastes
+            .iter()
+            .find(|(token, _)| prefix.ends_with(token.as_str()))
+            .map(|(token, _)| token.clone())
+    }
+
+    /// 粘贴载荷入框：多行折叠为占位 token，单行原样插入
+    fn insert_paste(&mut self, cleaned: &str) {
+        if cleaned.is_empty() {
+            return;
+        }
+        if cleaned.contains('\n') {
+            let token = self.register_paste(cleaned);
+            self.insert(&token);
+        } else {
+            self.insert(cleaned);
+        }
     }
 
     fn insert(&mut self, s: &str) {
@@ -285,7 +319,6 @@ impl UiState {
         self.cursor = pos + s.chars().count();
         self.files = list_workspace_files(&self.app.cwd); // @ 触发时重扫（对齐 TS onAtTrigger）
         self.sync_completion();
-        self.note_input_edited();
     }
 
     fn backspace(&mut self) {
@@ -293,12 +326,21 @@ impl UiState {
             return;
         }
         let pos = self.cursor.min(self.input.chars().count());
+        // 光标压在粘贴 token 末尾：整体删除（一次退格移除整个占位）
+        if let Some(token) = self.token_ending_at(pos) {
+            let token_len = token.chars().count();
+            let head: String = self.input.chars().take(pos - token_len).collect();
+            let tail: String = self.input.chars().skip(pos).collect();
+            self.input = format!("{head}{tail}");
+            self.cursor = pos - token_len;
+            self.sync_completion();
+            return;
+        }
         let head: String = self.input.chars().take(pos - 1).collect();
         let tail: String = self.input.chars().skip(pos).collect();
         self.input = format!("{head}{tail}");
         self.cursor = pos - 1;
         self.sync_completion();
-        self.note_input_edited();
     }
 
     fn move_cursor(&mut self, delta: i32) {
@@ -310,14 +352,14 @@ impl UiState {
     fn take_input(&mut self) -> String {
         let text = std::mem::take(&mut self.input);
         self.cursor = 0;
-        self.input_collapsed = false;
-        self.prev_input_multi = false;
         self.completion.close();
-        if !text.trim().is_empty() {
-            self.input_history.push(text.trim().to_string());
-            inputlog::append(text.trim(), &self.app.cwd);
+        // 提交即展开：历史与模型都拿粘贴全文（token 只在编辑时存在）
+        let expanded = self.expand_tokens(&text);
+        if !expanded.trim().is_empty() {
+            self.input_history.push(expanded.trim().to_string());
+            inputlog::append(expanded.trim(), &self.app.cwd);
         }
-        text
+        expanded
     }
 }
 
@@ -423,7 +465,8 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
     let key = match ev {
         Event::Key(k) => k,
         Event::Paste(text) => {
-            ui.insert(&normalize_paste(&text));
+            let cleaned = normalize_paste(&text);
+            ui.insert_paste(&cleaned);
             return false;
         }
         Event::Resize(_, _) => return false,
@@ -549,7 +592,6 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
                 ui.input = ui.completion.apply(&ui.input, &name);
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
-                ui.note_input_edited();
                 return false;
             }
             _ => {}
@@ -564,34 +606,22 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
             return apply_effect(ui, effect).await.unwrap_or(false);
         }
         KeyCode::Up => {
-            // 有内容：折叠态先展开，否则跨行移动光标（文本编辑器语义）；空框：历史回填
+            // 有内容：跨行移动光标（文本编辑器语义）；空框：历史回填
             if !ui.input.is_empty() {
-                if ui.is_collapsed() {
-                    ui.input_collapsed = false;
-                } else {
-                    ui.cursor = cursor_vertical_move(&ui.input, ui.cursor, -1);
-                }
+                ui.cursor = cursor_vertical_move(&ui.input, ui.cursor, -1);
             } else if let Some(prev) = ui.input_history.recall_up(&ui.input) {
                 ui.input = prev;
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
-                ui.note_input_edited();
             }
         }
         KeyCode::Down => {
             if !ui.input.is_empty() {
-                // 光标已在末行且为多行：折叠（与 ↑ 展开对偶，形成闭环）
-                let next = cursor_vertical_move(&ui.input, ui.cursor, 1);
-                if next == ui.cursor && ui.input.contains('\n') {
-                    ui.input_collapsed = true;
-                } else {
-                    ui.cursor = next;
-                }
+                ui.cursor = cursor_vertical_move(&ui.input, ui.cursor, 1);
             } else if let Some(next) = ui.input_history.recall_down() {
                 ui.input = next;
                 ui.cursor = ui.input.chars().count();
                 ui.sync_completion();
-                ui.note_input_edited();
             }
         }
         KeyCode::Tab => { /* 无补全时忽略 */ }
@@ -630,8 +660,8 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
         }
         KeyCode::Backspace => ui.backspace(),
         // 折叠态内容视为整体：横移键不动（先 ↑ 展开），避免在不可见位置插入
-        KeyCode::Left if !ui.is_collapsed() => ui.move_cursor(-1),
-        KeyCode::Right if !ui.is_collapsed() => ui.move_cursor(1),
+        KeyCode::Left => ui.move_cursor(-1),
+        KeyCode::Right => ui.move_cursor(1),
         KeyCode::Home => ui.cursor = 0,
         KeyCode::End => ui.cursor = ui.input.chars().count(),
         KeyCode::Char(c) => {
@@ -782,14 +812,10 @@ fn current_effort() -> ThinkingEffort {
 
 fn draw(f: &mut ratatui::Frame, ui: &mut UiState) {
     let area = f.area();
-    // 输入框高度随内容行数自适应（多行粘贴整块进入，框体随之长高）
+    // 输入框高度随内容行数自适应（多行粘贴折叠为占位 token，框体通常单行）
     let chunks = Layout::vertical([
         Constraint::Min(0),
-        Constraint::Length(input_box_height(
-            &ui.input,
-            INPUT_MAX_ROWS,
-            ui.is_collapsed(),
-        )),
+        Constraint::Length(input_box_height(&ui.input, INPUT_MAX_ROWS)),
         Constraint::Length(1),
     ])
     .split(area);
@@ -885,48 +911,21 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, ui: &UiState) {
         (" 输入 ", Color::DarkGray)
     };
     // 多行输入：首行带提示符，后续行两格缩进（\n 是文本换行，不是提交）；
-    // 折叠态只渲染首行 + 行数徽标（对齐主流终端 agent 的折叠输入）
-    let is_collapsed = ui.is_collapsed();
-    let collapsed_suffix = if is_collapsed {
-        Some(
-            crate::locales::strings(ui.app.cfg.language)
-                .input_collapsed_suffix
-                .replace("{n}", &((ui.input.split('\n').count() - 1).to_string())),
-        )
-    } else {
-        None
-    };
-    let lines: Vec<Line> = if let Some(suffix) = &collapsed_suffix {
-        let first = ui.input.split('\n').next().unwrap_or("");
-        vec![Line::from(format!("{prefix}{first}{suffix}"))]
-    } else {
-        ui.input
-            .split('\n')
-            .enumerate()
-            .map(|(i, l)| {
-                if i == 0 {
-                    Line::from(format!("{prefix}{l}"))
-                } else {
-                    Line::from(format!("  {l}"))
-                }
-            })
-            .collect()
-    };
+    // 多行粘贴已折叠为占位 token，框内通常单行（历史回填的多行条目仍整块显示）
+    let lines: Vec<Line> = ui
+        .input
+        .split('\n')
+        .enumerate()
+        .map(|(i, l)| {
+            if i == 0 {
+                Line::from(format!("{prefix}{l}"))
+            } else {
+                Line::from(format!("  {l}"))
+            }
+        })
+        .collect();
     let visible = area.height.saturating_sub(2) as usize;
-    let (crow, ccol) = if is_collapsed {
-        // 折叠态光标钉在整行末尾（徽标之后）：列 = 首行显示宽度 + 徽标显示宽度
-        let first_width = ui
-            .input
-            .split('\n')
-            .next()
-            .map_or(0, unicode_width::UnicodeWidthStr::width);
-        let suffix_width = collapsed_suffix
-            .as_deref()
-            .map_or(0, unicode_width::UnicodeWidthStr::width);
-        (0, first_width + suffix_width)
-    } else {
-        input_row_col(&ui.input, ui.cursor)
-    };
+    let (crow, ccol) = input_row_col(&ui.input, ui.cursor);
     // 光标行超出可视区时滚动，保证光标始终可见
     let top = if visible == 0 || crow < visible {
         0
@@ -1171,13 +1170,9 @@ fn cursor_vertical_move(input: &str, cursor: usize, delta: i32) -> usize {
     prefix + target_col
 }
 
-/// 输入框总高度 = 内容行数（至少 1，封顶 max_rows）+ 上下边框 2；折叠态恒为 1 行
-fn input_box_height(input: &str, max_rows: u16, collapsed: bool) -> u16 {
-    let rows = if collapsed {
-        1
-    } else {
-        input.split('\n').count() as u16
-    };
+/// 输入框总高度 = 内容行数（至少 1，封顶 max_rows）+ 上下边框 2
+fn input_box_height(input: &str, max_rows: u16) -> u16 {
+    let rows = input.split('\n').count() as u16;
     rows.max(1).min(max_rows.max(1)) + 2
 }
 
@@ -1254,67 +1249,16 @@ mod paste_tests {
 
     #[test]
     fn input_box_height_grows_with_lines_and_caps() {
-        assert_eq!(input_box_height("", 12, false), 3); // 1 行 + 上下边框
-        assert_eq!(input_box_height("a\nb\nc", 12, false), 5);
+        assert_eq!(input_box_height("", 12), 3); // 1 行 + 上下边框
+        assert_eq!(input_box_height("a\nb\nc", 12), 5);
         let many = "x\n".repeat(50);
-        assert_eq!(input_box_height(&many, 12, false), 14); // 封顶 12 + 2
-    }
-
-    #[test]
-    fn input_box_height_collapsed_is_single_row() {
-        let many = "x\n".repeat(50);
-        assert_eq!(input_box_height(&many, 12, true), 3);
+        assert_eq!(input_box_height(&many, 12), 14); // 封顶 12 + 2
     }
 }
 
 #[cfg(test)]
-mod collapse_tests {
+mod paste_token_tests {
     use super::*;
-
-    #[test]
-    fn single_to_multi_transition_collapses() {
-        let mut ui = ui_for_test();
-        ui.insert("首行");
-        assert!(!ui.is_collapsed());
-        ui.insert("\n次行\n三行");
-        assert!(ui.is_collapsed());
-        // 已折叠时继续编辑不再改变折叠态
-        ui.insert("续");
-        assert!(ui.is_collapsed());
-    }
-
-    #[test]
-    fn expand_then_edit_stays_expanded() {
-        let mut ui = ui_for_test();
-        ui.insert("a\nb");
-        assert!(ui.is_collapsed());
-        ui.input_collapsed = false; // ↑ 展开后的状态
-        ui.insert("c");
-        assert!(!ui.is_collapsed());
-    }
-
-    #[test]
-    fn backspace_removing_last_newline_uncollapses_render() {
-        let mut ui = ui_for_test();
-        ui.insert("a\nb");
-        assert!(ui.is_collapsed());
-        ui.backspace();
-        assert_eq!(ui.input, "a\n");
-        assert!(ui.is_collapsed());
-        ui.backspace();
-        assert_eq!(ui.input, "a");
-        // 内容回到单行：折叠标志虽在，is_collapsed 以内容为准
-        assert!(!ui.is_collapsed());
-    }
-
-    #[test]
-    fn take_input_resets_collapse_state() {
-        let mut ui = ui_for_test();
-        ui.insert("a\nb");
-        ui.take_input();
-        assert!(!ui.input_collapsed);
-        assert!(!ui.prev_input_multi);
-    }
 
     /// UiState::new 依赖 ChatApp/文件扫描，构造最小状态（同 app.rs 测试的 app() 口径）
     fn ui_for_test() -> UiState {
@@ -1326,5 +1270,73 @@ mod collapse_tests {
             )),
         );
         UiState::new(app, None, false)
+    }
+
+    #[test]
+    fn multiline_paste_becomes_placeholder_token() {
+        let mut ui = ui_for_test();
+        ui.insert_paste("首行\n次行\n三行");
+        assert_eq!(ui.input, "[Pasted text #1 +3 lines]");
+        assert_eq!(ui.cursor, ui.input.chars().count());
+        // 输入框内容不含粘贴原文，token 已登记
+        assert!(!ui.input.contains("次行"));
+        assert_eq!(ui.pastes.len(), 1);
+    }
+
+    #[test]
+    fn single_line_paste_stays_raw() {
+        let mut ui = ui_for_test();
+        ui.insert_paste("单行内容");
+        assert_eq!(ui.input, "单行内容");
+        assert!(ui.pastes.is_empty());
+    }
+
+    #[test]
+    fn backspace_removes_whole_token_at_once() {
+        let mut ui = ui_for_test();
+        ui.insert("前缀 ");
+        ui.insert_paste("a\nb");
+        assert!(ui.input.contains("[Pasted text #1 +2 lines]"));
+        ui.backspace(); // 光标在 token 末尾：一次退格整体删除
+        assert_eq!(ui.input, "前缀 ");
+        assert_eq!(ui.cursor, "前缀 ".chars().count());
+        // 再退格回到普通逐字符删除
+        ui.backspace();
+        assert_eq!(ui.input, "前缀");
+    }
+
+    #[test]
+    fn backspace_inside_or_after_token_text_stays_charwise() {
+        let mut ui = ui_for_test();
+        ui.insert_paste("a\nb");
+        // 光标移到 token 中间：逐字符删除
+        ui.move_cursor(-3);
+        ui.backspace();
+        assert!(ui.input.starts_with("[Pasted"));
+    }
+
+    #[test]
+    fn take_input_expands_tokens_to_full_content() {
+        let mut ui = ui_for_test();
+        ui.insert("看这段：");
+        ui.insert_paste("L1\nL2\nL3");
+        let text = ui.take_input();
+        assert_eq!(text, "看这段：L1\nL2\nL3");
+        // 历史/后续提交拿全文；token 只在编辑期存在
+        assert!(text.contains("L2"));
+        assert!(!text.contains("[Pasted text"));
+    }
+
+    #[test]
+    fn numbered_tokens_increment_per_paste() {
+        let mut ui = ui_for_test();
+        ui.insert_paste("a\nb");
+        ui.insert(" + ");
+        ui.insert_paste("c\nd\ne");
+        assert_eq!(
+            ui.input,
+            "[Pasted text #1 +2 lines] + [Pasted text #2 +3 lines]"
+        );
+        assert_eq!(ui.expand_tokens(&ui.input), "a\nb + c\nd\ne");
     }
 }
