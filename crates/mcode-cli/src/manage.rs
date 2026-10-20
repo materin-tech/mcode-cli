@@ -61,15 +61,22 @@ fn provider(app: &mut ChatApp, arg: &str) -> Effect {
             Effect::None
         }
         "add" => {
-            // add <name> <baseURL> <apiKeyEnv> <models逗号分隔> [multimodal逗号分隔]
+            // add <name> <baseURL> <apiKeyEnv> <models逗号分隔> [multimodal逗号分隔] [responses|chat]
             let parts: Vec<&str> = rest.split_whitespace().collect();
-            if !(4..=5).contains(&parts.len()) {
+            if !(4..=6).contains(&parts.len()) {
                 app.notice(
-                    "用法：/provider add <名称> <baseURL> <apiKeyEnv> <模型,逗号分隔> [multimodal模型,逗号分隔]",
+                    "用法：/provider add <名称> <baseURL> <apiKeyEnv> <模型,逗号分隔> [multimodal模型,逗号分隔] [responses|chat]",
                     true,
                 );
                 return Effect::None;
             }
+            let protocol = match parts.get(5).map(|s| mcode_core::config::Protocol::parse(s)) {
+                Some(None) => {
+                    app.notice("✗ protocol 只支持 responses | chat".to_string(), true);
+                    return Effect::None;
+                }
+                p => p.flatten().unwrap_or_default(),
+            };
             let csv = |s: &str| -> Vec<String> {
                 s.split(',')
                     .map(|x| x.trim().to_string())
@@ -82,6 +89,7 @@ fn provider(app: &mut ChatApp, arg: &str) -> Effect {
                 api_key_env: parts[2].to_string(),
                 models: csv(parts[3]),
                 multimodal_models: parts.get(4).map(|s| csv(s)).unwrap_or_default(),
+                protocol,
             };
             match app.cfg.add_provider(p) {
                 Ok(()) => {

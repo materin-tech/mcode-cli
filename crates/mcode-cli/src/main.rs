@@ -162,6 +162,12 @@ fn add_provider(rest: &[String]) -> Result<()> {
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
         .collect();
+    // API 协议（responses | chat，缺省 responses）；私有化部署（vLLM 等）通常需要 chat
+    let protocol = match std::env::var("MCODE_PROTOCOL").ok().as_deref() {
+        None | Some("") => mcode_core::config::Protocol::default(),
+        Some(s) => mcode_core::config::Protocol::parse(s)
+            .ok_or_else(|| anyhow::anyhow!("MCODE_PROTOCOL 只支持 responses | chat，得到 {s}"))?,
+    };
 
     let mut cfg = Config::load();
     cfg.providers.retain(|p| p.name != name);
@@ -172,6 +178,7 @@ fn add_provider(rest: &[String]) -> Result<()> {
         api_key_env: key_env,
         models: models.clone(),
         multimodal_models: multimodal,
+        protocol,
     });
     cfg.active_provider = Some(name.clone());
     cfg.active_model = Some(model0);

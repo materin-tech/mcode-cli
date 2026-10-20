@@ -181,6 +181,9 @@ impl Guide {
                     vec![]
                 },
                 models,
+                // 引导暂不提供协议选择；私有化部署（vLLM 等仅 Chat Completions）
+                // 需 /provider add 末位参数或手改 config.json 的 protocol 为 "chat"
+                protocol: mcode_core::config::Protocol::default(),
             },
             default_mode: MODES[self.select_index.min(MODES.len() - 1)],
         }
