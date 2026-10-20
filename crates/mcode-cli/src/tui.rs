@@ -482,6 +482,12 @@ async fn handle_event(ui: &mut UiState, ev: crossterm::event::Event) -> bool {
         Event::Resize(_, _) => return false,
         _ => return false,
     };
+    // Windows 上 crossterm 对每次按键发 Press + Release 两个事件（macOS 后端只发 Press），
+    // 不过滤会把每个字符处理两遍（实测：终端输入双字符）。自动重复在 Windows 后端
+    // 是多条 Press 事件，不受影响；Release 一律忽略。
+    if key.kind != crossterm::event::KeyEventKind::Press {
+        return false;
+    }
     let KeyEvent {
         code, modifiers, ..
     } = key;
