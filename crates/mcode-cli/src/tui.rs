@@ -317,7 +317,12 @@ impl UiState {
         let tail: String = self.input.chars().skip(pos).collect();
         self.input = format!("{head}{s}{tail}");
         self.cursor = pos + s.chars().count();
-        self.files = list_workspace_files(&self.app.cwd); // @ 触发时重扫（对齐 TS onAtTrigger）
+        // 文件列表只有 @ 补全用得到：仅当本次输入引入 '@' 才重扫。此前每击键
+        // 全量重扫工作区（对齐 TS onAtTrigger 的"触发时扫描"语义走偏了），
+        // 深目录上每敲一个字符卡一次
+        if s.contains('@') {
+            self.files = list_workspace_files(&self.app.cwd);
+        }
         self.sync_completion();
     }
 
