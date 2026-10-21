@@ -9,7 +9,7 @@ use crate::view;
 use anyhow::{Result, bail};
 use mcode_core::agent::completion::{CompletionState, InputHistory, Trigger};
 use mcode_core::agent::context::{MAX_GOAL_ROUNDS, check_goal_complete};
-use mcode_core::agent::runner::{MAX_TOOL_TURNS, TurnOpts, run_agent_turn};
+use mcode_core::agent::runner::{TurnOpts, run_agent_turn};
 use mcode_core::commands::filter_commands;
 use mcode_core::config::{Config, DesktopConfig, ThinkingEffort};
 use mcode_core::permission::Decision;
@@ -789,7 +789,7 @@ async fn spawn_turn(ui: &mut UiState, t: Turn) {
             &t.input,
             TurnOpts {
                 instructions: None,
-                max_turns: MAX_TOOL_TURNS,
+                max_turns: 0, // 主会话不设轮次上限，死循环处理直到任务完成
                 goal,
                 tools_filter: None,
                 attachments: t.attachments,
