@@ -4,24 +4,32 @@
 use crate::chat::ChatItem;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
+use unicode_width::UnicodeWidthChar;
 
-/// 按显示宽度贪心换行（CJK 友好：按字符切，不做拉丁断词优化）。
-/// 尊重显式 `\n`；width 为 0 时按 1 处理。
+/// 按显示宽度贪心换行（CJK 友好：宽字符按 2 格计，与终端渲染的 unicode-width
+/// 同口径）。此前按字符数切片——中文每字占 2 格，切出的行实际渲染宽度是
+/// width 的两倍，右侧被截断。不做拉丁断词优化。尊重显式 `\n`；width 为 0 时按 1 处理。
 pub fn wrap(s: &str, width: usize) -> Vec<String> {
     let width = width.max(1);
     let mut out = vec![];
     for para in s.split('\n') {
-        if para.is_empty() {
-            out.push(String::new());
-            continue;
+        let mut cur = String::new();
+        let mut cells = 0usize;
+        for ch in para.chars() {
+            let w = ch.width().unwrap_or(0);
+            // 零宽字符（组合符号/变体选择符）跟随前字符，不参与换行
+            if w == 0 && !cur.is_empty() {
+                cur.push(ch);
+                continue;
+            }
+            if cells + w > width && !cur.is_empty() {
+                out.push(std::mem::take(&mut cur));
+                cells = 0;
+            }
+            cur.push(ch);
+            cells += w;
         }
-        let chars: Vec<char> = para.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            let end = (i + width).min(chars.len());
-            out.push(chars[i..end].iter().collect());
-            i = end;
-        }
+        out.push(cur);
     }
     if out.is_empty() {
         out.push(String::new());
@@ -139,8 +147,17 @@ mod tests {
     fn wrap_respects_newlines_and_width() {
         assert_eq!(wrap("ab\ncd", 10), vec!["ab", "cd"]);
         assert_eq!(wrap("abcdef", 3), vec!["abc", "def"]);
-        assert_eq!(wrap("中文换行测试", 2), vec!["中文", "换行", "测试"]);
         assert_eq!(wrap("", 4), vec![""]);
+    }
+
+    #[test]
+    fn wrap_counts_display_width_not_chars() {
+        // CJK 每字 2 格：width 4 = 每行 2 个汉字（旧实现按字符切，行宽翻倍被截断）
+        assert_eq!(wrap("中文换行测试", 4), vec!["中文", "换行", "测试"]);
+        // 混合宽度按累计单元格断行："a中b" = 1+2+1 = 4 格
+        assert_eq!(wrap("a中b文", 4), vec!["a中b", "文"]);
+        // 极窄宽度：单个宽字符独占一行，不可再分
+        assert_eq!(wrap("中文", 1), vec!["中", "文"]);
     }
 
     #[test]

@@ -17,4 +17,5 @@ anyhow = { workspace = true }
 chrono = { workspace = true }
 ratatui = { workspace = true }
 crossterm = { workspace = true }
+unicode-width = { workspace = true }
 include_dir = "0.7"

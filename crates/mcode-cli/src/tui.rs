@@ -22,6 +22,7 @@ use std::io::stdout;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
+use unicode_width::UnicodeWidthChar;
 
 /// 历史锁饿死防御超时（对齐桌面版）
 const HIST_LOCK_TIMEOUT: Duration = Duration::from_secs(10);
@@ -947,7 +948,7 @@ fn draw_input(f: &mut ratatui::Frame, area: Rect, ui: &UiState) {
         })
         .collect();
     let visible = area.height.saturating_sub(2) as usize;
-    let (crow, ccol) = input_row_col(&ui.input, ui.cursor);
+    let (crow, ccol) = input_cursor_cell(&ui.input, ui.cursor);
     // 光标行超出可视区时滚动，保证光标始终可见
     let top = if visible == 0 || crow < visible {
         0
@@ -1183,6 +1184,20 @@ fn input_row_col(input: &str, cursor: usize) -> (usize, usize) {
     (row, col)
 }
 
+/// 光标的渲染位置：(行, 终端单元格列)。列按显示宽度计（CJK 宽字符占 2 格，
+/// 与 ratatui 渲染用的 unicode-width 同口径）。input_row_col 的字符列直接当
+/// 单元格画光标，行内含中文时每个宽字符累积 1 格偏差——光标块落在错误位置。
+fn input_cursor_cell(input: &str, cursor: usize) -> (usize, usize) {
+    let (row, char_col) = input_row_col(input, cursor);
+    let line = input.split('\n').nth(row).unwrap_or("");
+    let col = line
+        .chars()
+        .take(char_col)
+        .map(|ch| ch.width().unwrap_or(0))
+        .sum();
+    (row, col)
+}
+
 /// 光标垂直跨行移动（文本编辑器语义）：保留列、目标列 clamp 到目标行行尾，
 /// 已在首行/末行则原地不动。delta 为 -1（上）/ 1（下）。
 fn cursor_vertical_move(input: &str, cursor: usize, delta: i32) -> usize {
@@ -1257,6 +1272,22 @@ mod cursor_tests {
         // 光标停在第一行末（'\n' 上，index 2）→ 上移不动、下移到第二行行首列 clamp
         assert_eq!(cursor_vertical_move(MULTI, 2, -1), 2);
         assert_eq!(cursor_vertical_move(MULTI, 2, 1), 2 + 1 + 2);
+    }
+
+    #[test]
+    fn cursor_cell_counts_display_width_not_chars() {
+        // ASCII：单元格列 = 字符列
+        assert_eq!(input_cursor_cell("abc", 2), (0, 2));
+        // CJK 每字占 2 格：2 个字符 → 4 格（旧实现返回 2，光标块落错位置）
+        assert_eq!(input_cursor_cell("你好", 2), (0, 4));
+        // 光标在行首、混合宽度按前缀累计
+        assert_eq!(input_cursor_cell("你好", 0), (0, 0));
+        assert_eq!(input_cursor_cell("你a好", 3), (0, 5));
+        // 跨行：列只在当前行内累计
+        assert_eq!(input_cursor_cell("你\n好", 2), (1, 0));
+        assert_eq!(input_cursor_cell("你\n好", 3), (1, 2));
+        // 越界按文本末尾夹紧
+        assert_eq!(input_cursor_cell("你", 99), (0, 2));
     }
 }
 
