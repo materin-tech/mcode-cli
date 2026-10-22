@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/mcode-cli"]
 
 [workspace.package]
-version = "0.1.0-beta.11"
+version = "0.1.0-beta.12"
 edition = "2024"
 license = "MIT"
 
@@ -32,6 +32,7 @@ walkdir = "2"
 # CLI 依赖
 ratatui = "0.29"
 crossterm = "0.28"
+unicode-width = "0.2"  # CJK 宽字符显示宽度（光标定位/换行与终端渲染同口径）
 
 [profile.release]
 lto = "thin"
